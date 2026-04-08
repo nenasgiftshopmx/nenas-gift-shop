@@ -1,0 +1,33 @@
+@import url('https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=Playfair+Display:ital,wght@0,600;0,700;1,600&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  --nenas-pink: #E91E8C;
+  --nenas-pink-light: #FFF0F5;
+  --nenas-navy: #1a2744;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: 'Nunito', 'Segoe UI', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: var(--nenas-pink) !important;
+  box-shadow: 0 0 0 3px rgba(233, 30, 140, 0.1);
+}
+
+.btn-primary:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 6px 20px rgba(233, 30, 140, 0.35);
+}
+
+.card-hover:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 25px rgba(0, 0, 0, 0.06);
+}
