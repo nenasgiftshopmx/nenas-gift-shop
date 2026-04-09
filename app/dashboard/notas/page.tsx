@@ -498,7 +498,7 @@ export default function NotasPage() {
                       </button>
                     </div>
                     <input 
-                      ref={el => fileInputRefs.current[`file-${i}`] = el} 
+                      ref={el => { fileInputRefs.current[`file-${i}`] = el; }} 
                       type="file" 
                       accept="image/*" 
                       multiple 
@@ -506,7 +506,7 @@ export default function NotasPage() {
                       onChange={e => handleFileSelect(i, e.target.files)} 
                     />
                     <input 
-                      ref={el => cameraInputRefs.current[`cam-${i}`] = el} 
+                      ref={el => { cameraInputRefs.current[`cam-${i}`] = el; }} 
                       type="file" 
                       accept="image/*" 
                       capture="environment" 
