@@ -59,6 +59,10 @@ export default function NotasPage() {
   const [search, setSearch] = useState('');
   const [saving, setSaving] = useState(false);
   
+  // 🆕 Confirmaciones
+  const [pendingClienteSave, setPendingClienteSave] = useState(false);
+  const [pendingProductosSave, setPendingProductosSave] = useState<string[]>([]);
+  
   // 🆕 Fotos
   const [uploadingFoto, setUploadingFoto] = useState<string | null>(null);
   const fileInputRefs = useRef<{ [key: string]: HTMLInputElement | null }>({});
@@ -88,84 +92,86 @@ export default function NotasPage() {
   const handleNew = () => { setEditNota(emptyNota()); setView('form'); };
   const handleEdit = (n: Nota) => { setEditNota({ ...n }); setView('form'); };
 
-  // 🆕 GUARDAR CON CONFIRMACIONES CORREGIDO
+  // 🆕 GUARDAR CON CONFIRMACIONES
   const handleSave = async () => {
     if (!editNota) return;
-    setSaving(true);
     
+    // 1. Verificar si cliente es nuevo
+    let clienteExiste = false;
+    if (editNota.nombre && editNota.nombre.trim()) {
+      const existente = await findClienteByNameOrPhone(editNota.nombre, editNota.telefono || '');
+      clienteExiste = !!existente;
+      
+      if (!clienteExiste && !pendingClienteSave) {
+        // Preguntar si quiere guardar cliente
+        if (window.confirm(`¿Deseas agregar "${editNota.nombre}" al directorio de clientes?`)) {
+          setPendingClienteSave(true);
+        }
+      }
+    }
+    
+    // 2. Verificar productos nuevos
+    const productosNuevos: string[] = [];
+    if (editNota.items && Array.isArray(editNota.items)) {
+      for (const item of editNota.items) {
+        if (item.articulo && item.articulo.trim()) {
+          const existe = await findProductoByName(item.articulo);
+          if (!existe && !pendingProductosSave.includes(item.articulo)) {
+            productosNuevos.push(item.articulo);
+          }
+        }
+      }
+    }
+    
+    if (productosNuevos.length > 0) {
+      if (window.confirm(`¿Deseas agregar estos productos al catálogo?\n\n${productosNuevos.join('\n')}`)) {
+        setPendingProductosSave(productosNuevos);
+      }
+    }
+    
+    // 3. Guardar todo
+    setSaving(true);
     try {
-      // 1. Guardar la nota primero
-      let notaId = editNota.id;
-      if (notaId) {
+      // Guardar cliente si se confirmó
+      if (pendingClienteSave && editNota.nombre) {
+        await createCliente({
+          nombre: editNota.nombre.trim(),
+          telefono: editNota.telefono?.trim() || '',
+          email: '',
+          direccion: '',
+          totalPedidos: 0,
+          totalGastado: 0,
+        });
+      }
+      
+      // Guardar productos si se confirmó
+      for (const productoNombre of pendingProductosSave) {
+        const item = editNota.items.find((i: NotaItem) => i.articulo === productoNombre);
+        if (item) {
+          await createProducto({
+            nombre: productoNombre,
+            precio: parseFloat(item.precio) || 0,
+            categoria: 'General',
+            descripcion: item.detalles || '',
+            stock: 0,
+            activo: true,
+          });
+        }
+      }
+      
+      // Guardar nota
+      if (editNota.id) {
         const { id, ...data } = editNota;
         await updateNota(id, data);
       } else {
-        notaId = await createNota(editNota);
-        setEditNota((p: any) => ({ ...p, id: notaId }));
+        await createNota(editNota);
       }
       
-      // 2. Verificar si cliente es nuevo y preguntar
-      if (editNota.nombre && editNota.nombre.trim()) {
-        const existente = await findClienteByNameOrPhone(editNota.nombre, editNota.telefono || '');
-        
-        if (!existente) {
-          const guardarCliente = window.confirm(
-            `¿Deseas agregar "${editNota.nombre}" al directorio de clientes?`
-          );
-          
-          if (guardarCliente) {
-            await createCliente({
-              nombre: editNota.nombre.trim(),
-              telefono: editNota.telefono?.trim() || '',
-              email: '',
-              direccion: '',
-              totalPedidos: 1,
-              totalGastado: parseFloat(editNota.total || '0'),
-            });
-          }
-        }
-      }
-      
-      // 3. Verificar productos nuevos y preguntar
-      const productosNuevos: string[] = [];
-      const productosData: any[] = [];
-      
-      if (editNota.items && Array.isArray(editNota.items)) {
-        for (const item of editNota.items) {
-          if (item.articulo && item.articulo.trim()) {
-            const existe = await findProductoByName(item.articulo);
-            if (!existe) {
-              productosNuevos.push(item.articulo);
-              productosData.push(item);
-            }
-          }
-        }
-      }
-      
-      if (productosNuevos.length > 0) {
-        const guardarProductos = window.confirm(
-          `¿Deseas agregar estos productos al catálogo?\n\n${productosNuevos.join('\n')}`
-        );
-        
-        if (guardarProductos) {
-          for (const item of productosData) {
-            await createProducto({
-              nombre: item.articulo.trim(),
-              precio: parseFloat(item.precio) || 0,
-              categoria: 'General',
-              descripcion: item.detalles || '',
-              stock: 0,
-              activo: true,
-            });
-          }
-        }
-      }
-      
-      // 4. Recargar todo
       await loadData();
       setView('list');
       setEditNota(null);
-      
+      setPendingClienteSave(false);
+      setPendingProductosSave([]);
     } catch (e) {
       console.error('Error saving:', e);
       alert('Error al guardar. Intenta de nuevo.');

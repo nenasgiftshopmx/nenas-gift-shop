@@ -5,6 +5,9 @@ export interface NotaItem {
   precio: string;
   importe: string;
   entrega: number; // 1, 2, or 3
+  // 🆕 NUEVOS CAMPOS
+  detalles?: string; // Especificaciones del cliente
+  fotos?: string[]; // URLs de Firebase Storage
 }
 
 export interface EntregaFecha {
@@ -39,7 +42,7 @@ export interface Cliente {
   id?: string;
   nombre: string;
   telefono: string;
-  email: string;
+  email: string; // 🆕 Ya existía pero ahora se usa más
   direccion?: string;
   totalPedidos: number;
   totalGastado: number;
@@ -52,8 +55,15 @@ export interface Producto {
   id?: string;
   nombre: string;
   categoria: string;
-  precio: number;
-  precioMayoreo?: number;
+  precio: number; // Precio individual
+  // 🆕 PRECIOS ESCALONADOS
+  precioDocena?: number; // Precio por docena (12 unidades)
+  cantidadDocena?: number; // Default: 12
+  precioMedioMayoreo?: number; // Precio medio mayoreo
+  cantidadMedioMayoreo?: number; // Ej: 50
+  precioMayoreo?: number; // Precio mayoreo
+  cantidadMayoreo?: number; // Ej: 100
+  // OTROS
   stock: number;
   descripcion?: string;
   imagen?: string; // Firebase Storage URL
