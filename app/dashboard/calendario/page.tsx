@@ -1,113 +1,237 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect } from 'react';
 import { getNotas } from '@/lib/firestore';
-import { Nota, Delivery, NotaItem, EntregaFecha } from '@/types';
-import { useWidth } from '@/hooks/useWidth';
+import { Nota, NotaItem } from '@/types';
+import { useAuth } from '@/contexts/AuthContext';
 
 const meses = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
-const dias = ['Dom','Lun','Mar','Mié','Jue','Vie','Sáb'];
-const entregaColors = [
-  { bg:'#FFF0F5', border:'#FFB6D9', text:'#D6006E', dot:'#E91E8C' },
-  { bg:'#EEF0FF', border:'#B6C4FE', text:'#2B3F8E', dot:'#3B4FA0' },
-  { bg:'#EDFCF2', border:'#A3E4BC', text:'#14633A', dot:'#1A8A4A' },
-];
 
-const StatusBadge = ({ status }: { status: string }) => {
-  const c: Record<string, { l: string; bg: string; c: string }> = {
-    pending: { l: 'Pendiente', bg: '#FFF3CD', c: '#856404' },
-    confirmed: { l: 'Confirmado', bg: '#D1E7DD', c: '#0F5132' },
-    preparing: { l: 'Preparando', bg: '#E0CFFC', c: '#432874' },
-    delivered: { l: 'Entregado', bg: '#CFE2FF', c: '#084298' },
-  };
-  const cfg = c[status] || c.pending;
-  return <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold" style={{ background: cfg.bg, color: cfg.c }}><span className="w-1 h-1 rounded-full" style={{ background: cfg.c }}/>{cfg.l}</span>;
-};
+interface Entrega {
+  fecha: Date;
+  folio: string;
+  cliente: string;
+  items: NotaItem[];
+  asignadaA?: string;
+  asignadaNombre?: string;
+  notaId?: string;
+}
 
 export default function CalendarioPage() {
+  const { esAdmin } = useAuth();
   const [notas, setNotas] = useState<Nota[]>([]);
   const [loading, setLoading] = useState(true);
-  const today = new Date();
-  const [calMonth, setCalMonth] = useState(today.getMonth());
-  const [calYear, setCalYear] = useState(today.getFullYear());
-  const [selectedDay, setSelectedDay] = useState<number | null>(null);
-  const { isDesktop } = useWidth();
+  const [filtro, setFiltro] = useState<'todas' | 'tere' | 'cinthia'>('todas');
+  const [mesActual, setMesActual] = useState(new Date());
 
   useEffect(() => { loadNotas(); }, []);
-  const loadNotas = async () => { try { setNotas(await getNotas()); } catch (e) { console.error(e); } finally { setLoading(false); } };
 
-  const allDeliveries = useMemo<Delivery[]>(() => {
-    const delivs: Delivery[] = [];
-    notas.forEach(n => {
-      n.entregas?.forEach((ent: EntregaFecha, ei: number) => {
-        if (!ent.dia || !ent.mes) return;
-        const items = n.items?.filter((it: NotaItem) => it.entrega === ei + 1 && it.articulo) || [];
-        delivs.push({
-          day: parseInt(ent.dia), month: parseInt(ent.mes) - 1, year: parseInt(ent.anio || '2026'),
-          label: ent.label, folio: n.folio, client: n.nombre, items, status: n.status, colorIdx: ei, notaId: n.id,
+  const loadNotas = async () => {
+    try {
+      const data = await getNotas();
+      setNotas(data);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const getEntregas = (): Entrega[] => {
+    const entregas: Entrega[] = [];
+    
+    notas.forEach(nota => {
+      if (!nota.entregas || !Array.isArray(nota.entregas)) return;
+      
+      nota.entregas.forEach((entrega, idx) => {
+        if (!entrega.dia || !entrega.mes || !entrega.anio) return;
+        
+        const itemsDeEstaEntrega = nota.items?.filter(item => item.entrega === idx + 1) || [];
+        if (itemsDeEstaEntrega.length === 0) return;
+        
+        const fecha = new Date(
+          parseInt(entrega.anio),
+          parseInt(entrega.mes) - 1,
+          parseInt(entrega.dia)
+        );
+        
+        if (isNaN(fecha.getTime())) return;
+        
+        entregas.push({
+          fecha,
+          folio: nota.folio,
+          cliente: nota.nombre,
+          items: itemsDeEstaEntrega,
+          asignadaA: nota.asignadaA,
+          asignadaNombre: nota.asignadaNombre,
+          notaId: nota.id,
         });
       });
     });
-    return delivs;
-  }, [notas]);
+    
+    return entregas.sort((a, b) => a.fecha.getTime() - b.fecha.getTime());
+  };
 
-  const getForDay = (d: number, m: number, y: number) => allDeliveries.filter(dl => dl.day === d && dl.month === m && dl.year === y);
+  const entregasFiltradas = getEntregas().filter(e => {
+    if (filtro === 'todas') return true;
+    if (filtro === 'tere') return e.asignadaA === 'tere@nenasgiftshop.com';
+    if (filtro === 'cinthia') return e.asignadaA === 'cinthia@nenasgiftshop.com';
+    return true;
+  });
 
-  const daysInMonth = new Date(calYear, calMonth + 1, 0).getDate();
-  const firstDay = new Date(calYear, calMonth, 1).getDay();
-  const calDays: (number | null)[] = [];
-  for (let i = 0; i < firstDay; i++) calDays.push(null);
-  for (let i = 1; i <= daysInMonth; i++) calDays.push(i);
+  const entregasPorDia: Record<string, Entrega[]> = {};
+  entregasFiltradas.forEach(e => {
+    const key = e.fecha.toISOString().split('T')[0];
+    if (!entregasPorDia[key]) entregasPorDia[key] = [];
+    entregasPorDia[key].push(e);
+  });
 
-  const selectedDeliveries = selectedDay ? getForDay(selectedDay, calMonth, calYear) : [];
+  const diasDelMes: Date[] = [];
+  const primerDia = new Date(mesActual.getFullYear(), mesActual.getMonth(), 1);
+  const ultimoDia = new Date(mesActual.getFullYear(), mesActual.getMonth() + 1, 0);
+  
+  for (let d = new Date(primerDia); d <= ultimoDia; d.setDate(d.getDate() + 1)) {
+    diasDelMes.push(new Date(d));
+  }
 
-  // Upcoming 14 days
-  const upcoming = useMemo<(Delivery & { date: Date })[]>(() => {
-    const list: (Delivery & { date: Date })[] = [];
-    for (let i = 0; i < 14; i++) {
-      const d = new Date(today); d.setDate(d.getDate() + i);
-      getForDay(d.getDate(), d.getMonth(), d.getFullYear()).forEach(dl => list.push({ ...dl, date: new Date(d) }));
-    }
-    return list;
-  }, [allDeliveries]);
+  const mesAnterior = () => {
+    setMesActual(new Date(mesActual.getFullYear(), mesActual.getMonth() - 1, 1));
+  };
 
-  const prevMonth = () => { if (calMonth === 0) { setCalMonth(11); setCalYear(calYear - 1); } else setCalMonth(calMonth - 1); setSelectedDay(null); };
-  const nextMonth = () => { if (calMonth === 11) { setCalMonth(0); setCalYear(calYear + 1); } else setCalMonth(calMonth + 1); setSelectedDay(null); };
+  const mesSiguiente = () => {
+    setMesActual(new Date(mesActual.getFullYear(), mesActual.getMonth() + 1, 1));
+  };
+
+  const hoy = new Date();
+  hoy.setHours(0, 0, 0, 0);
 
   if (loading) {
-    return <div className="text-center py-20 text-gray-400"><div className="text-4xl mb-3 animate-bounce">📅</div><p className="text-sm">Cargando calendario...</p></div>;
+    return (
+      <div className="text-center py-16">
+        <div className="text-4xl mb-3 animate-bounce">📅</div>
+        <p className="text-sm text-gray-400 font-body">Cargando calendario...</p>
+      </div>
+    );
   }
 
   return (
-    <div>
-      {/* Calendar */}
-      <div className="bg-white rounded-2xl border border-gray-100 p-5 mb-4 shadow-sm">
-        <div className="flex justify-between items-center mb-5">
-          <button onClick={prevMonth} className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-500 cursor-pointer font-body text-sm">‹</button>
-          <h3 className="font-display text-xl font-bold text-gray-800 m-0">{meses[calMonth]} {calYear}</h3>
-          <button onClick={nextMonth} className="px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-500 cursor-pointer font-body text-sm">›</button>
+    <div className="p-4 max-w-6xl mx-auto">
+      {/* Header con filtros */}
+      <div className="bg-white rounded-2xl border border-gray-100 p-4 mb-4 shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-3">
+            <button onClick={mesAnterior} className="w-9 h-9 rounded-lg bg-gray-100 hover:bg-gray-200 flex items-center justify-center font-bold text-gray-600">
+              ←
+            </button>
+            <h2 className="text-xl font-bold text-gray-800 font-body">
+              {meses[mesActual.getMonth()]} {mesActual.getFullYear()}
+            </h2>
+            <button onClick={mesSiguiente} className="w-9 h-9 rounded-lg bg-gray-100 hover:bg-gray-200 flex items-center justify-center font-bold text-gray-600">
+              →
+            </button>
+          </div>
+          
+          {esAdmin && (
+            <div className="flex gap-2">
+              <button
+                onClick={() => setFiltro('todas')}
+                className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all ${
+                  filtro === 'todas'
+                    ? 'bg-gray-800 text-white shadow-md'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                📋 Todas
+              </button>
+              <button
+                onClick={() => setFiltro('tere')}
+                className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all ${
+                  filtro === 'tere'
+                    ? 'bg-purple-600 text-white shadow-md'
+                    : 'bg-purple-50 text-purple-600 hover:bg-purple-100'
+                }`}
+              >
+                👤 Tere
+              </button>
+              <button
+                onClick={() => setFiltro('cinthia')}
+                className={`px-4 py-2 rounded-lg font-semibold text-sm transition-all ${
+                  filtro === 'cinthia'
+                    ? 'bg-green-600 text-white shadow-md'
+                    : 'bg-green-50 text-green-600 hover:bg-green-100'
+                }`}
+              >
+                👤 Cinthia
+              </button>
+            </div>
+          )}
         </div>
-        <div className="grid grid-cols-7 gap-1.5">
-          {dias.map(d => <div key={d} className="text-center text-[11px] font-bold text-gray-400 py-1.5">{d}</div>)}
-          {calDays.map((day, idx) => {
-            if (!day) return <div key={`e${idx}`} />;
-            const isToday = day === today.getDate() && calMonth === today.getMonth() && calYear === today.getFullYear();
-            const delivs = getForDay(day, calMonth, calYear);
-            const isSel = selectedDay === day;
+      </div>
+
+      {/* Calendario */}
+      <div className="bg-white rounded-2xl border border-gray-100 p-4 shadow-sm">
+        <div className="grid grid-cols-7 gap-2 mb-3">
+          {['Dom', 'Lun', 'Mar', 'Mié', 'Jue', 'Vie', 'Sáb'].map(dia => (
+            <div key={dia} className="text-center text-xs font-bold text-gray-400 py-2">
+              {dia}
+            </div>
+          ))}
+        </div>
+
+        <div className="grid grid-cols-7 gap-2">
+          {/* Espacios vacíos antes del primer día */}
+          {Array.from({ length: primerDia.getDay() }).map((_, i) => (
+            <div key={`empty-${i}`} className="aspect-square" />
+          ))}
+
+          {/* Días del mes */}
+          {diasDelMes.map(dia => {
+            const key = dia.toISOString().split('T')[0];
+            const entregasDelDia = entregasPorDia[key] || [];
+            const esHoy = dia.getTime() === hoy.getTime();
+            const esPasado = dia < hoy;
+
             return (
-              <div key={idx} onClick={() => setSelectedDay(day === selectedDay ? null : day)}
-                className="text-center py-2 px-1 rounded-xl cursor-pointer transition-all min-h-[44px]"
-                style={{
-                  background: isSel ? 'linear-gradient(135deg, #FF69B4, #E91E8C)' : isToday ? '#FFF0F5' : '#FAFAFA',
-                  color: isSel ? 'white' : isToday ? '#E91E8C' : '#2D2D2D',
-                  fontWeight: isToday || isSel ? 800 : 500,
-                  fontSize: '13px',
-                  border: isToday && !isSel ? '2px solid #E91E8C' : '2px solid transparent',
-                }}>
-                {day}
-                {delivs.length > 0 && (
-                  <div className="flex justify-center gap-0.5 mt-1">
-                    {delivs.slice(0, 3).map((d, i) => <span key={i} className="w-1.5 h-1.5 rounded-full" style={{ background: isSel ? 'white' : entregaColors[d.colorIdx]?.dot || '#E91E8C' }} />)}
+              <div
+                key={key}
+                className={`aspect-square rounded-xl border-2 p-2 transition-all ${
+                  esHoy
+                    ? 'border-nenas-600 bg-nenas-50'
+                    : esPasado
+                    ? 'border-gray-100 bg-gray-50'
+                    : 'border-gray-200 bg-white hover:border-gray-300'
+                }`}
+              >
+                <div className={`text-xs font-bold mb-1 ${
+                  esHoy ? 'text-nenas-600' : esPasado ? 'text-gray-400' : 'text-gray-700'
+                }`}>
+                  {dia.getDate()}
+                </div>
+
+                {entregasDelDia.length > 0 && (
+                  <div className="space-y-1">
+                    {entregasDelDia.slice(0, 3).map((entrega, idx) => {
+                      const color = entrega.asignadaA === 'tere@nenasgiftshop.com' 
+                        ? 'bg-purple-100 text-purple-700'
+                        : entrega.asignadaA === 'cinthia@nenasgiftshop.com'
+                        ? 'bg-green-100 text-green-700'
+                        : 'bg-gray-100 text-gray-700';
+                      
+                      return (
+                        <div
+                          key={idx}
+                          className={`text-[10px] px-1.5 py-0.5 rounded font-semibold truncate ${color}`}
+                          title={`${entrega.folio} - ${entrega.cliente}`}
+                        >
+                          {entrega.folio}
+                        </div>
+                      );
+                    })}
+                    {entregasDelDia.length > 3 && (
+                      <div className="text-[9px] text-gray-400 font-bold text-center">
+                        +{entregasDelDia.length - 3}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -116,59 +240,71 @@ export default function CalendarioPage() {
         </div>
       </div>
 
-      {/* Selected day detail */}
-      {selectedDay !== null && (
-        <div className="bg-white rounded-2xl border border-gray-100 p-4 mb-4 shadow-sm" style={selectedDeliveries.length > 0 ? { background: 'linear-gradient(135deg, #FFF8E1, #FFFDE7)', borderColor: '#FFE082' } : {}}>
-          <h3 className="text-sm font-bold text-gray-800 mb-3">
-            {selectedDeliveries.length > 0 ? `📦 Entregas del ${selectedDay} ${meses[calMonth]}` : `✨ ${selectedDay} ${meses[calMonth]} — Sin entregas`}
-          </h3>
-          {selectedDeliveries.map((d, i) => {
-            const col = entregaColors[d.colorIdx] || entregaColors[0];
-            return (
-              <div key={i} className="bg-white rounded-xl p-3 mb-2" style={{ border: `1.5px solid ${col.border}` }}>
-                <div className="flex items-center gap-2 mb-1.5">
-                  <span className="w-5 h-5 rounded flex items-center justify-center text-white text-[10px] font-extrabold" style={{ background: col.dot }}>{d.colorIdx + 1}</span>
-                  <span className="text-sm font-bold text-gray-800">{d.client}</span>
-                  <span className="text-xs text-gray-400">{d.folio}</span>
-                  <span className="ml-auto"><StatusBadge status={d.status} /></span>
-                </div>
-                {d.label && <div className="text-xs font-semibold mb-1" style={{ color: col.text }}>🏷️ {d.label}</div>}
-                {d.items.map((it: NotaItem, j: number) => <div key={j} className="text-xs text-gray-500 py-0.5">• {it.cantidad}x {it.articulo}</div>)}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {/* Lista de entregas del mes */}
+      <div className="mt-4 bg-white rounded-2xl border border-gray-100 p-4 shadow-sm">
+        <h3 className="text-lg font-bold text-gray-800 mb-4 font-body">
+          📋 Entregas de {meses[mesActual.getMonth()]}
+        </h3>
 
-      {/* Upcoming 14 days */}
-      {upcoming.length > 0 && (
-        <div className="bg-white rounded-2xl border border-gray-100 p-4 shadow-sm">
-          <h3 className="text-sm font-bold text-gray-800 mb-3">📅 Próximas Entregas (14 días)</h3>
-          {upcoming.map((d, i) => {
-            const col = entregaColors[d.colorIdx] || entregaColors[0];
-            return (
-              <div key={i} className="flex items-center gap-3 p-2.5 rounded-xl border border-gray-50 mb-1.5">
-                <div className="w-10 text-center">
-                  <div className="text-lg font-extrabold" style={{ color: '#E91E8C' }}>{d.day}</div>
-                  <div className="text-[10px] text-gray-400">{meses[d.month]?.slice(0, 3)}</div>
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-bold text-gray-800">{d.client}</div>
-                  <div className="text-xs text-gray-400">{d.label || 'Entrega general'} · {d.items.length} art.</div>
-                </div>
-                <StatusBadge status={d.status} />
-              </div>
-            );
-          })}
-        </div>
-      )}
+        {entregasFiltradas.length === 0 ? (
+          <div className="text-center py-8 text-gray-400">
+            <div className="text-3xl mb-2">📭</div>
+            <p className="text-sm">No hay entregas programadas</p>
+          </div>
+        ) : (
+          <div className="space-y-3">
+            {entregasFiltradas.map((entrega, idx) => {
+              const color = entrega.asignadaA === 'tere@nenasgiftshop.com' 
+                ? { bg: '#F3E8FF', border: '#9333EA', text: '#9333EA' }
+                : entrega.asignadaA === 'cinthia@nenasgiftshop.com'
+                ? { bg: '#D1FAE5', border: '#10B981', text: '#10B981' }
+                : { bg: '#F3F4F6', border: '#9CA3AF', text: '#6B7280' };
 
-      {upcoming.length === 0 && !selectedDay && (
-        <div className="bg-white rounded-2xl border border-gray-100 p-8 text-center text-gray-400 shadow-sm">
-          <div className="text-3xl mb-2">📅</div>
-          <p className="text-sm">No hay entregas próximas. Las entregas de tus notas aparecerán aquí automáticamente.</p>
-        </div>
-      )}
+              return (
+                <div
+                  key={idx}
+                  className="p-4 rounded-xl border-2"
+                  style={{ background: color.bg, borderColor: color.border }}
+                >
+                  <div className="flex items-center justify-between mb-2">
+                    <div>
+                      <span className="font-bold text-sm" style={{ color: color.text }}>
+                        {entrega.folio}
+                      </span>
+                      <span className="text-gray-600 text-sm ml-2">
+                        {entrega.fecha.toLocaleDateString('es-MX', { 
+                          weekday: 'short', 
+                          day: 'numeric', 
+                          month: 'short' 
+                        })}
+                      </span>
+                    </div>
+                    {entrega.asignadaNombre && (
+                      <span className="text-xs font-bold px-2 py-1 rounded" style={{ 
+                        background: color.bg, 
+                        color: color.text,
+                        border: `1px solid ${color.border}`
+                      }}>
+                        👤 {entrega.asignadaNombre}
+                      </span>
+                    )}
+                  </div>
+                  <div className="text-sm font-semibold text-gray-800 mb-2">
+                    {entrega.cliente}
+                  </div>
+                  <div className="text-xs text-gray-600">
+                    {entrega.items.map((item, i) => (
+                      <div key={i}>
+                        • {item.cantidad}x {item.articulo}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </div>
     </div>
   );
 }

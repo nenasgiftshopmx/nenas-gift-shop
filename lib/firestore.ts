@@ -14,9 +14,57 @@ import {
 } from 'firebase/firestore';
 import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
 import { db, storage } from './firebase';
-import { Nota, Cliente, Producto } from '@/types';
+import { Nota, Cliente, Producto, AuditLog } from '@/types';
 
-// ==================== NOTAS ====================
+// ==================== AUDITORÍA ====================
+const auditLogsRef = collection(db, 'audit_logs');
+
+export async function registrarAuditoria(log: Omit<AuditLog, 'id' | 'fecha'>): Promise<void> {
+  try {
+    await addDoc(auditLogsRef, {
+      ...log,
+      fecha: serverTimestamp(),
+    });
+  } catch (error) {
+    console.error('Error registrando auditoría:', error);
+    // No lanzar error para no bloquear la operación principal
+  }
+}
+
+export async function getAuditoriaDeNota(notaId: string): Promise<AuditLog[]> {
+  try {
+    const q = query(auditLogsRef, where('notaId', '==', notaId), orderBy('fecha', 'desc'));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as AuditLog));
+  } catch (error) {
+    console.error('Error obteniendo auditoría:', error);
+    return [];
+  }
+}
+
+export async function getAuditoriaDeUsuario(usuarioEmail: string): Promise<AuditLog[]> {
+  try {
+    const q = query(auditLogsRef, where('usuario', '==', usuarioEmail), orderBy('fecha', 'desc'));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as AuditLog));
+  } catch (error) {
+    console.error('Error obteniendo auditoría de usuario:', error);
+    return [];
+  }
+}
+
+export async function getAuditoriaCompleta(): Promise<AuditLog[]> {
+  try {
+    const q = query(auditLogsRef, orderBy('fecha', 'desc'));
+    const snapshot = await getDocs(q);
+    return snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() } as AuditLog));
+  } catch (error) {
+    console.error('Error obteniendo auditoría completa:', error);
+    return [];
+  }
+}
+
+// ==================== NOTAS CON AUDITORÍA ====================
 const notasRef = collection(db, 'notas');
 
 export async function getNotas(): Promise<Nota[]> {
@@ -32,27 +80,127 @@ export async function getNota(id: string): Promise<Nota | null> {
   return { id: docSnap.id, ...docSnap.data() } as Nota;
 }
 
-export async function createNota(nota: Omit<Nota, 'id'>): Promise<string> {
-  const docRef = await addDoc(notasRef, {
+export async function createNota(
+  nota: Omit<Nota, 'id'>, 
+  usuario: { email: string; nombre: string }
+): Promise<string> {
+  const notaConAudit = {
     ...nota,
+    creadaPor: usuario.email,
+    creadaPorNombre: usuario.nombre,
+    ultimaModificacionPor: usuario.email,
+    ultimaModificacionNombre: usuario.nombre,
+    ultimaModificacionFecha: serverTimestamp(),
     createdAt: serverTimestamp(),
     updatedAt: serverTimestamp(),
+  };
+  
+  const docRef = await addDoc(notasRef, notaConAudit);
+  
+  // Registrar en auditoría
+  await registrarAuditoria({
+    notaId: docRef.id,
+    notaFolio: nota.folio,
+    accion: 'crear',
+    usuario: usuario.email,
+    usuarioNombre: usuario.nombre,
+    detalles: `Nota creada para cliente: ${nota.nombre}`,
   });
+  
   return docRef.id;
 }
 
-export async function updateNota(id: string, data: Partial<Nota>): Promise<void> {
+export async function updateNota(
+  id: string, 
+  data: Partial<Nota>,
+  usuario: { email: string; nombre: string },
+  cambiosDetalle?: string
+): Promise<void> {
+  const notaAnterior = await getNota(id);
+  
+  const dataConAudit = {
+    ...data,
+    ultimaModificacionPor: usuario.email,
+    ultimaModificacionNombre: usuario.nombre,
+    ultimaModificacionFecha: serverTimestamp(),
+    updatedAt: serverTimestamp(),
+  };
+  
   const docRef = doc(db, 'notas', id);
-  await updateDoc(docRef, { ...data, updatedAt: serverTimestamp() });
+  await updateDoc(docRef, dataConAudit);
+  
+  // Registrar en auditoría
+  const cambios: any[] = [];
+  if (notaAnterior) {
+    // Detectar cambios importantes
+    if (data.total && data.total !== notaAnterior.total) {
+      cambios.push({ campo: 'Total', antes: notaAnterior.total, despues: data.total });
+    }
+    if (data.status && data.status !== notaAnterior.status) {
+      cambios.push({ campo: 'Estado', antes: notaAnterior.status, despues: data.status });
+    }
+    if (data.asignadaA && data.asignadaA !== notaAnterior.asignadaA) {
+      cambios.push({ 
+        campo: 'Asignación', 
+        antes: notaAnterior.asignadaNombre || 'Sin asignar', 
+        despues: data.asignadaNombre || 'Sin asignar' 
+      });
+    }
+  }
+  
+  const auditLog: any = {
+    notaId: id,
+    notaFolio: notaAnterior?.folio || '',
+    accion: 'editar',
+    usuario: usuario.email,
+    usuarioNombre: usuario.nombre,
+    detalles: cambiosDetalle || 'Nota editada',
+  };
+  
+  if (cambios.length > 0) {
+    auditLog.cambios = cambios;
+  }
+  
+  await registrarAuditoria(auditLog);
 }
 
-export async function deleteNota(id: string): Promise<void> {
+export async function deleteNota(
+  id: string,
+  usuario: { email: string; nombre: string },
+  motivo?: string
+): Promise<void> {
+  const nota = await getNota(id);
+  
+  if (nota) {
+    await registrarAuditoria({
+      notaId: id,
+      notaFolio: nota.folio,
+      accion: 'eliminar',
+      usuario: usuario.email,
+      usuarioNombre: usuario.nombre,
+      detalles: motivo || 'Nota eliminada',
+    });
+  }
+  
   const docRef = doc(db, 'notas', id);
   await deleteDoc(docRef);
 }
 
-// ==================== FOTOS DE PRODUCTOS EN NOTAS ====================
-// 🆕 Subir foto de referencia para un producto
+export async function asignarNota(
+  notaId: string,
+  asignadaA: string,
+  asignadaNombre: string,
+  usuario: { email: string; nombre: string }
+): Promise<void> {
+  await updateNota(
+    notaId,
+    { asignadaA, asignadaNombre },
+    usuario,
+    `Asignada a ${asignadaNombre}`
+  );
+}
+
+// ==================== FOTOS ====================
 export async function uploadProductoFoto(file: File, notaId: string, itemIndex: number): Promise<string> {
   try {
     const timestamp = Date.now();
@@ -69,14 +217,12 @@ export async function uploadProductoFoto(file: File, notaId: string, itemIndex: 
   }
 }
 
-// 🆕 Eliminar foto
 export async function deleteFoto(url: string): Promise<void> {
   try {
     const storageRef = ref(storage, url);
     await deleteObject(storageRef);
   } catch (error) {
     console.error('Error deleting foto:', error);
-    // No throw - si falla la eliminación, no es crítico
   }
 }
 
@@ -96,10 +242,8 @@ export async function getCliente(id: string): Promise<Cliente | null> {
   return { id: docSnap.id, ...docSnap.data() } as Cliente;
 }
 
-// 🆕 BUSCAR CLIENTE POR NOMBRE O TELÉFONO (evitar duplicados)
 export async function findClienteByNameOrPhone(nombre: string, telefono: string): Promise<Cliente | null> {
   try {
-    // Primero buscar por teléfono (más único)
     if (telefono && telefono.trim()) {
       const qPhone = query(clientesRef, where('telefono', '==', telefono.trim()));
       const snapshotPhone = await getDocs(qPhone);
@@ -109,7 +253,6 @@ export async function findClienteByNameOrPhone(nombre: string, telefono: string)
       }
     }
     
-    // Si no encuentra por teléfono, buscar por nombre exacto
     if (nombre && nombre.trim()) {
       const qName = query(clientesRef, where('nombre', '==', nombre.trim()));
       const snapshotName = await getDocs(qName);
@@ -123,35 +266,6 @@ export async function findClienteByNameOrPhone(nombre: string, telefono: string)
   } catch (error) {
     console.error('Error buscando cliente:', error);
     return null;
-  }
-}
-
-// 🆕 CREAR O ACTUALIZAR CLIENTE (sincronización automática)
-export async function upsertCliente(clienteData: Partial<Cliente>): Promise<string> {
-  try {
-    const { nombre = '', telefono = '' } = clienteData;
-    
-    // Buscar si ya existe
-    const existente = await findClienteByNameOrPhone(nombre, telefono);
-    
-    if (existente) {
-      // Actualizar datos si existen
-      await updateCliente(existente.id!, clienteData);
-      return existente.id!;
-    } else {
-      // Crear nuevo
-      return await createCliente({
-        nombre: nombre || '',
-        telefono: telefono || '',
-        email: clienteData.email || '',
-        direccion: clienteData.direccion || '',
-        totalPedidos: 0,
-        totalGastado: 0,
-      } as Omit<Cliente, 'id'>);
-    }
-  } catch (error) {
-    console.error('Error en upsertCliente:', error);
-    throw error;
   }
 }
 
@@ -189,7 +303,6 @@ export async function getProducto(id: string): Promise<Producto | null> {
   return { id: docSnap.id, ...docSnap.data() } as Producto;
 }
 
-// 🆕 BUSCAR PRODUCTO POR NOMBRE (evitar duplicados)
 export async function findProductoByName(nombre: string): Promise<Producto | null> {
   try {
     if (!nombre || !nombre.trim()) return null;
@@ -206,38 +319,6 @@ export async function findProductoByName(nombre: string): Promise<Producto | nul
   } catch (error) {
     console.error('Error buscando producto:', error);
     return null;
-  }
-}
-
-// 🆕 CREAR O ACTUALIZAR PRODUCTO (sincronización automática)
-export async function upsertProducto(productoData: Partial<Producto>): Promise<string> {
-  try {
-    const { nombre = '' } = productoData;
-    
-    // Buscar si ya existe
-    const existente = await findProductoByName(nombre);
-    
-    if (existente) {
-      // Actualizar precio si cambió
-      if (productoData.precio && productoData.precio !== existente.precio) {
-        await updateProducto(existente.id!, { precio: productoData.precio });
-      }
-      return existente.id!;
-    } else {
-      // Crear nuevo
-      return await createProducto({
-        nombre: nombre || '',
-        descripcion: productoData.descripcion || '',
-        precio: productoData.precio || 0,
-        categoria: productoData.categoria || 'General',
-        stock: productoData.stock || 0,
-        imagen: productoData.imagen || '',
-        activo: true,
-      } as Omit<Producto, 'id'>);
-    }
-  } catch (error) {
-    console.error('Error en upsertProducto:', error);
-    throw error;
   }
 }
 
@@ -260,8 +341,6 @@ export async function deleteProducto(id: string): Promise<void> {
 }
 
 // ==================== EMAIL ====================
-// 🆕 Función helper para enviar email (requiere backend o servicio)
-// Por ahora solo abre el cliente de email con el contenido pre-llenado
 export function sendEmailToCliente(cliente: Cliente, subject: string, body: string): void {
   const mailtoLink = `mailto:${cliente.email}?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
   window.location.href = mailtoLink;

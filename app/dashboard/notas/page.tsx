@@ -1,9 +1,24 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { getNotas, createNota, updateNota, deleteNota as deleteNotaFB, getClientes, getProductos, findClienteByNameOrPhone, findProductoByName, createCliente, createProducto, uploadProductoFoto, deleteFoto } from '@/lib/firestore';
+import { 
+  getNotas, 
+  createNota, 
+  updateNota, 
+  deleteNota,
+  getClientes, 
+  getProductos, 
+  findClienteByNameOrPhone, 
+  findProductoByName, 
+  createCliente, 
+  createProducto, 
+  uploadProductoFoto, 
+  deleteFoto
+} from '@/lib/firestore';
 import { Nota, NotaItem, EntregaFecha, Cliente, Producto } from '@/types';
+import { useAuth } from '@/contexts/AuthContext';
 import { useWidth } from '@/hooks/useWidth';
+import HistorialAuditoria from '@/components/HistorialAuditoria';
 
 const meses = ['Enero','Febrero','Marzo','Abril','Mayo','Junio','Julio','Agosto','Septiembre','Octubre','Noviembre','Diciembre'];
 const entregaColors = [
@@ -45,10 +60,20 @@ const emptyNota = (): Omit<Nota, 'id'> => {
     notas: '', 
     entregas: [{ dia: '', mes: '', anio: String(t.getFullYear()), label: '' }],
     total: '', anticipo1: '', status: 'pending',
+    asignadaA: '',
+    asignadaNombre: '',
   };
 };
 
 export default function NotasPage() {
+  const auth = useAuth();
+  const usuarioActual = auth?.usuarioActual || null;
+  const puedeCrearNotas = auth?.puedeCrearNotas ?? true;
+  const puedeEditarNotas = auth?.puedeEditarNotas ?? true;
+  const puedeEliminarNotas = auth?.puedeEliminarNotas ?? true;
+  const puedeAsignarNotas = auth?.puedeAsignarNotas ?? true;
+  const puedeVerAuditoriaCompleta = auth?.puedeVerAuditoriaCompleta ?? false;
+  
   const [notas, setNotas] = useState<Nota[]>([]);
   const [clientes, setClientes] = useState<Cliente[]>([]);
   const [productos, setProductos] = useState<Producto[]>([]);
@@ -59,10 +84,12 @@ export default function NotasPage() {
   const [search, setSearch] = useState('');
   const [saving, setSaving] = useState(false);
   
-  // 🆕 Fotos
   const [uploadingFoto, setUploadingFoto] = useState<string | null>(null);
   const fileInputRefs = useRef<{ [key: string]: HTMLInputElement | null }>({});
   const cameraInputRefs = useRef<{ [key: string]: HTMLInputElement | null }>({});
+  
+  const [showHistorial, setShowHistorial] = useState(false);
+  const [historialNotaId, setHistorialNotaId] = useState<string | null>(null);
   
   const { isDesktop } = useWidth();
 
@@ -85,54 +112,54 @@ export default function NotasPage() {
     }
   };
 
-  const handleNew = () => { setEditNota(emptyNota()); setView('form'); };
-  const handleEdit = (n: Nota) => { setEditNota({ ...n }); setView('form'); };
+  const handleNew = () => { 
+    if (!puedeCrearNotas) { alert('No tienes permisos para crear notas'); return; }
+    setEditNota(emptyNota()); 
+    setView('form'); 
+  };
+  
+  const handleEdit = (n: Nota) => { 
+    if (!puedeEditarNotas) { alert('No tienes permisos para editar notas'); return; }
+    setEditNota({ ...n }); 
+    setView('form'); 
+  };
 
-  // 🆕 GUARDAR CON CONFIRMACIONES CORREGIDO
   const handleSave = async () => {
     if (!editNota) return;
     setSaving(true);
     
     try {
-      // 1. Guardar la nota primero
+      const usuario = usuarioActual ? {
+        email: usuarioActual.email,
+        nombre: usuarioActual.nombre,
+      } : { email: 'system', nombre: 'Sistema' };
+      
       let notaId = editNota.id;
       if (notaId) {
-        const { id, ...data } = editNota;
-        await updateNota(id, data);
+        await updateNota(notaId, editNota, usuario);
       } else {
-        notaId = await createNota(editNota);
+        notaId = await createNota(editNota, usuario);
         setEditNota((p: any) => ({ ...p, id: notaId }));
       }
       
-      // 2. Verificar si cliente es nuevo y preguntar
       if (editNota.nombre && editNota.nombre.trim()) {
         const existente = await findClienteByNameOrPhone(editNota.nombre, editNota.telefono || '');
-        
-        if (!existente) {
-          const guardarCliente = window.confirm(
-            `¿Deseas agregar "${editNota.nombre}" al directorio de clientes?`
-          );
-          
-          if (guardarCliente) {
-            await createCliente({
-              nombre: editNota.nombre.trim(),
-              telefono: editNota.telefono?.trim() || '',
-              email: '',
-              direccion: '',
-              totalPedidos: 1,
-              totalGastado: parseFloat(editNota.total || '0'),
-            });
-          }
+        if (!existente && window.confirm(`¿Agregar "${editNota.nombre}" a clientes?`)) {
+          await createCliente({
+            nombre: editNota.nombre.trim(),
+            telefono: editNota.telefono?.trim() || '',
+            email: '', direccion: '',
+            totalPedidos: 1,
+            totalGastado: parseFloat(editNota.total || '0'),
+          });
         }
       }
       
-      // 3. Verificar productos nuevos y preguntar
       const productosNuevos: string[] = [];
       const productosData: any[] = [];
-      
-      if (editNota.items && Array.isArray(editNota.items)) {
+      if (editNota.items) {
         for (const item of editNota.items) {
-          if (item.articulo && item.articulo.trim()) {
+          if (item.articulo?.trim()) {
             const existe = await findProductoByName(item.articulo);
             if (!existe) {
               productosNuevos.push(item.articulo);
@@ -142,58 +169,48 @@ export default function NotasPage() {
         }
       }
       
-      if (productosNuevos.length > 0) {
-        const guardarProductos = window.confirm(
-          `¿Deseas agregar estos productos al catálogo?\n\n${productosNuevos.join('\n')}`
-        );
-        
-        if (guardarProductos) {
-          for (const item of productosData) {
-            await createProducto({
-              nombre: item.articulo.trim(),
-              precio: parseFloat(item.precio) || 0,
-              categoria: 'General',
-              descripcion: item.detalles || '',
-              stock: 0,
-              activo: true,
-            });
-          }
+      if (productosNuevos.length > 0 && window.confirm(`¿Agregar productos?\n\n${productosNuevos.join('\n')}`)) {
+        for (const item of productosData) {
+          await createProducto({
+            nombre: item.articulo.trim(),
+            precio: parseFloat(item.precio) || 0,
+            categoria: 'General',
+            descripcion: item.detalles || '',
+            stock: 0, activo: true,
+          });
         }
       }
       
-      // 4. Recargar todo
       await loadData();
       setView('list');
       setEditNota(null);
-      
     } catch (e) {
-      console.error('Error saving:', e);
-      alert('Error al guardar. Intenta de nuevo.');
+      console.error(e);
+      alert('Error al guardar');
     } finally {
       setSaving(false);
     }
   };
 
   const handleDelete = async (id: string) => {
-    if (!confirm('¿Eliminar esta nota?')) return;
+    if (!puedeEliminarNotas) { alert('No tienes permisos'); return; }
+    if (!usuarioActual) return;
+    const motivo = prompt('¿Motivo?');
+    if (motivo === null) return;
     try {
-      await deleteNotaFB(id);
+      await deleteNota(id, { email: usuarioActual.email, nombre: usuarioActual.nombre }, motivo || undefined);
       await loadData();
-    } catch (e) {
-      console.error(e);
-    }
+    } catch (e) { console.error(e); }
+  };
+
+  const verHistorial = (notaId: string) => {
+    setHistorialNotaId(notaId);
+    setShowHistorial(true);
   };
 
   const updateField = (f: string, v: any) => setEditNota((p: any) => ({ ...p, [f]: v }));
-
-  const selectCliente = (cliente: Cliente) => {
-    setEditNota((p: any) => ({
-      ...p,
-      nombre: cliente.nombre,
-      telefono: cliente.telefono || '',
-    }));
-  };
-
+  const selectCliente = (c: Cliente) => setEditNota((p: any) => ({ ...p, nombre: c.nombre, telefono: c.telefono || '' }));
+  
   const updateItem = (idx: number, f: string, v: any) => {
     setEditNota((p: any) => {
       const items = [...p.items];
@@ -208,169 +225,56 @@ export default function NotasPage() {
     });
   };
 
-  const selectProducto = (idx: number, producto: Producto) => {
-    updateItem(idx, 'articulo', producto.nombre);
-    if (producto.precio) {
-      updateItem(idx, 'precio', String(producto.precio));
-    }
+  const selectProducto = (idx: number, p: Producto) => {
+    updateItem(idx, 'articulo', p.nombre);
+    if (p.precio) updateItem(idx, 'precio', String(p.precio));
   };
 
-  // 🆕 MANEJO DE FOTOS
   const handleFileSelect = async (idx: number, files: FileList | null) => {
-    if (!files || files.length === 0 || !editNota.id) return;
-    
+    if (!files || !editNota.id) { if (!editNota.id) alert('Guarda la nota primero'); return; }
     setUploadingFoto(`item-${idx}`);
     try {
-      const fotosUrls: string[] = [];
+      const urls: string[] = [];
       for (let i = 0; i < files.length; i++) {
-        const url = await uploadProductoFoto(files[i], editNota.id || 'temp', idx);
-        fotosUrls.push(url);
+        urls.push(await uploadProductoFoto(files[i], editNota.id, idx));
       }
-      
       setEditNota((p: any) => {
         const items = [...p.items];
-        items[idx] = { 
-          ...items[idx], 
-          fotos: [...(items[idx].fotos || []), ...fotosUrls] 
-        };
+        items[idx] = { ...items[idx], fotos: [...(items[idx].fotos || []), ...urls] };
         return { ...p, items };
       });
-    } catch (e) {
-      console.error('Error uploading:', e);
-      alert('Error al subir foto. Intenta de nuevo.');
-    } finally {
-      setUploadingFoto(null);
-    }
+    } catch (e) { alert('Error al subir foto'); }
+    finally { setUploadingFoto(null); }
   };
 
-  const handleDeleteFoto = async (idx: number, fotoUrl: string) => {
-    if (!confirm('¿Eliminar esta foto?')) return;
-    
+  const handleDeleteFoto = async (idx: number, url: string) => {
+    if (!confirm('¿Eliminar?')) return;
     try {
-      await deleteFoto(fotoUrl);
+      await deleteFoto(url);
       setEditNota((p: any) => {
         const items = [...p.items];
-        items[idx] = { 
-          ...items[idx], 
-          fotos: (items[idx].fotos || []).filter((f: string) => f !== fotoUrl) 
-        };
+        items[idx] = { ...items[idx], fotos: (items[idx].fotos || []).filter((f: string) => f !== url) };
         return { ...p, items };
       });
-    } catch (e) {
-      console.error('Error deleting:', e);
-    }
+    } catch (e) { console.error(e); }
   };
 
-  const downloadFoto = (url: string, filename: string) => {
+  const downloadFoto = (url: string, name: string) => {
     const a = document.createElement('a');
-    a.href = url;
-    a.download = filename;
-    a.target = '_blank';
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
+    a.href = url; a.download = name; a.target = '_blank';
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
   };
 
-  const addItem = () => setEditNota((p: any) => ({ 
-    ...p, 
-    items: [...p.items, { cantidad: '', articulo: '', precio: '', importe: '', entrega: 1, detalles: '', fotos: [] }] 
-  }));
+  const addItem = () => setEditNota((p: any) => ({ ...p, items: [...p.items, { cantidad: '', articulo: '', precio: '', importe: '', entrega: 1, detalles: '', fotos: [] }] }));
+  const removeItem = (i: number) => setEditNota((p: any) => ({ ...p, items: p.items.filter((_: any, idx: number) => idx !== i) }));
   
-  const removeItem = (idx: number) => {
-    if (editNota.items.length <= 1) return;
-    setEditNota((p: any) => {
-      const items = p.items.filter((_: any, i: number) => i !== idx);
-      const t = items.reduce((s: number, i: NotaItem) => s + (parseFloat(i.importe) || 0), 0);
-      return { ...p, items, total: t > 0 ? String(t) : '' };
-    });
-  };
-
-  const updateEntrega = (idx: number, f: string, v: string) => setEditNota((p: any) => { 
-    const e = [...p.entregas]; 
-    e[idx] = { ...e[idx], [f]: v }; 
-    return { ...p, entregas: e }; 
+  const updateEntrega = (i: number, f: string, v: string) => setEditNota((p: any) => { 
+    const e = [...p.entregas]; e[i] = { ...e[i], [f]: v }; return { ...p, entregas: e }; 
   });
-  
-  const addEntrega = () => { 
-    if (editNota.entregas.length >= 3) return; 
-    setEditNota((p: any) => ({ 
-      ...p, 
-      entregas: [...p.entregas, { dia: '', mes: '', anio: String(new Date().getFullYear()), label: '' }] 
-    })); 
-  };
-  
-  const removeEntrega = (idx: number) => {
-    if (editNota.entregas.length <= 1) return;
-    const rn = idx + 1;
-    setEditNota((p: any) => {
-      const e = p.entregas.filter((_: any, i: number) => i !== idx);
-      const items = p.items.map((it: NotaItem) => ({ 
-        ...it, 
-        entrega: it.entrega === rn ? 1 : it.entrega > rn ? it.entrega - 1 : it.entrega 
-      }));
-      return { ...p, entregas: e, items };
-    });
-  };
+  const addEntrega = () => setEditNota((p: any) => ({ ...p, entregas: [...p.entregas, { dia: '', mes: '', anio: '2026', label: '' }] }));
+  const removeEntrega = (i: number) => setEditNota((p: any) => ({ ...p, entregas: p.entregas.filter((_: any, idx: number) => idx !== i) }));
 
   const calcRest = (n: any) => Math.max(0, (parseFloat(n?.total) || 0) - (parseFloat(n?.anticipo1) || 0));
-
-  const canales = ['FB', 'IG', 'WA', 'Local'];
-
-  const shareWA = (n: any) => {
-    const filled = n.items.filter((i: NotaItem) => i.articulo);
-    const byEnt: Record<number, NotaItem[]> = {};
-    filled.forEach((it: NotaItem) => { 
-      const k = it.entrega || 1; 
-      if (!byEnt[k]) byEnt[k] = []; 
-      byEnt[k].push(it); 
-    });
-    let text = `*NENAS GIFT SHOP* 🎀\n📋 ${n.folio}\n📅 ${n.dia}/${n.mes}/${n.anio}\n\n👤 *${n.nombre}*\n📞 ${n.telefono}\n${n.evento ? `🎉 ${n.evento}\n` : ''}\n*ARTÍCULOS:*\n`;
-    n.entregas.forEach((ent: EntregaFecha, ei: number) => {
-      const items = byEnt[ei + 1];
-      if (!items?.length) return;
-      text += `\n🚚 *${fmtEntLabel(ent, ei)}${ent.label ? ' — ' + ent.label : ''}*\n`;
-      items.forEach((i: NotaItem) => { 
-        text += `  • ${i.cantidad}x ${i.articulo}`;
-        if (i.detalles) text += ` (${i.detalles})`;
-        text += ` — $${parseFloat(i.importe || '0').toLocaleString()}\n`;
-      });
-    });
-    text += `\n💰 *TOTAL: $${parseFloat(n.total || '0').toLocaleString()}*`;
-    if (n.anticipo1) { 
-      text += `\n✅ Anticipo: $${parseFloat(n.anticipo1).toLocaleString()}\n📌 Restante: $${calcRest(n).toLocaleString()}`; 
-    }
-    text += `\n\n_Las compras son finales. No hay devoluciones de anticipo por cancelación._\n\n📍 Av. Del Trabajo #41 Plaza Valle Dorado\n📞 (868) 162-7939`;
-    window.open(`https://wa.me/?text=${encodeURIComponent(text)}`, '_blank');
-  };
-
-  const printNota = () => {
-    const el = document.getElementById('nota-print');
-    if (!el) return;
-    const w = window.open('', '_blank');
-    if (!w) return;
-    w.document.write(`
-      <html>
-        <head>
-          <title>${editNota.folio}</title>
-          <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800&family=Playfair+Display:ital,wght@0,700;1,600&display=swap" rel="stylesheet">
-          <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body { font-family: 'Nunito', sans-serif; padding: 10mm; }
-            @page { size: letter; margin: 0; }
-            @media print {
-              body { padding: 5mm; }
-              .no-print { display: none !important; }
-            }
-          </style>
-        </head>
-        <body>
-          ${el.innerHTML}
-        </body>
-      </html>
-    `);
-    w.document.close();
-    setTimeout(() => { w.print(); }, 500);
-  };
 
   const inputCls = "w-full p-2.5 rounded-lg border-2 border-gray-100 text-sm outline-none bg-gray-50 font-body focus:border-nenas-600";
   const inputSmCls = "w-full p-2 rounded-lg border border-gray-100 text-sm outline-none bg-gray-50 text-center font-body focus:border-nenas-600";
@@ -378,871 +282,304 @@ export default function NotasPage() {
   const btnCls = "inline-flex items-center justify-center gap-1.5 px-4 py-2.5 rounded-xl border-none text-white text-sm font-bold cursor-pointer font-body";
   const btnSecCls = "inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-gray-200 bg-white text-gray-500 text-sm font-semibold cursor-pointer font-body";
 
-  // ===== LIST =====
+  // LISTA
   if (view === 'list') {
-    const filtered = notas.filter(n => 
-      n.nombre?.toLowerCase().includes(search.toLowerCase()) || 
-      n.folio?.toLowerCase().includes(search.toLowerCase())
-    );
+    const filtered = notas.filter(n => n.nombre?.toLowerCase().includes(search.toLowerCase()) || n.folio?.toLowerCase().includes(search.toLowerCase()));
     
     return (
-      <div>
+      <div className="p-4">
+        {showHistorial && historialNotaId && (
+          <HistorialAuditoria notaId={historialNotaId} onClose={() => setShowHistorial(false)} />
+        )}
+        
         <div className="flex flex-wrap gap-2.5 mb-4">
           <div className="flex items-center gap-2 bg-white rounded-xl border border-gray-100 px-3 py-2 flex-1 min-w-[180px]">
             <span className="text-gray-400">🔍</span>
-            <input 
-              value={search} 
-              onChange={e => setSearch(e.target.value)} 
-              placeholder="Buscar nota..." 
-              className="border-none outline-none text-sm w-full bg-transparent font-body" 
-            />
+            <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Buscar..." className="border-none outline-none text-sm w-full bg-transparent font-body" />
           </div>
-          <button 
-            onClick={handleNew} 
-            className={btnCls} 
-            style={{ background: 'linear-gradient(135deg, #FF69B4, #E91E8C)', boxShadow: '0 3px 12px rgba(233,30,140,0.25)' }}
-          >
-            ＋ Nueva Nota
-          </button>
+          {puedeCrearNotas && (
+            <button onClick={handleNew} className={btnCls} style={{ background: 'linear-gradient(135deg, #FF69B4, #E91E8C)' }}>
+              ＋ Nueva Nota
+            </button>
+          )}
         </div>
 
         {loading ? (
-          <div className="text-center py-16 text-gray-400">
-            <div className="text-4xl mb-3 animate-bounce">📋</div>
-            <p className="text-sm">Cargando notas...</p>
-          </div>
-        ) : notas.length === 0 ? (
-          <div className="text-center py-16 text-gray-400">
-            <div className="text-4xl mb-3">📋</div>
-            <p className="text-sm">No hay notas. ¡Crea la primera!</p>
-          </div>
-        ) : filtered.map(n => (
-          <div 
-            key={n.id || n.folio} 
-            className={`${cardCls} cursor-pointer hover:shadow-md transition-all`} 
-            onClick={() => handleEdit(n)}
-          >
-            <div className="flex items-center gap-3">
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-sm font-extrabold" style={{ color: '#E91E8C' }}>{n.folio}</span>
-                  <StatusBadge status={n.status} />
-                </div>
-                <div className="text-base font-bold text-gray-800 mt-1">{n.nombre}</div>
-                <div className="text-xs text-gray-400">
-                  {n.evento ? `🎉 ${n.evento} · ` : ''}
-                  {n.entregas?.length || 0} entrega(s) · {n.items?.filter((i: NotaItem) => i.articulo).length || 0} artículos
-                </div>
-              </div>
-              <div className="text-right">
-                <div className="text-lg font-extrabold text-gray-800">${parseFloat(n.total || '0').toLocaleString()}</div>
-                <div className="text-xs text-gray-400">{n.dia}/{n.mes}/{n.anio}</div>
-              </div>
-            </div>
-            <div className="flex flex-wrap gap-1.5 mt-2.5">
-              {n.entregas?.map((ent: EntregaFecha, ei: number) => {
-                const col = entregaColors[ei];
-                return (
-                  <span 
-                    key={ei} 
-                    className="text-xs font-bold px-2.5 py-1 rounded-md" 
-                    style={{ background: col.bg, color: col.text, border: `1px solid ${col.border}` }}
-                  >
-                    🚚 {fmtEntLabel(ent, ei)}{ent.label ? ` — ${ent.label}` : ''}
-                  </span>
-                );
-              })}
-            </div>
-            <div className="flex gap-2 mt-2.5" onClick={e => e.stopPropagation()}>
-              <button 
-                onClick={() => { setEditNota({ ...n }); setView('preview'); }} 
-                className={btnSecCls}
-              >
-                👁️ Ver
-              </button>
-              <button 
-                onClick={() => shareWA(n)} 
-                className="inline-flex items-center gap-1 px-3 py-2 rounded-lg border-none text-white text-xs font-bold cursor-pointer" 
-                style={{ background: '#25D366' }}
-              >
-                💬 WA
-              </button>
-              <button 
-                onClick={() => n.id && handleDelete(n.id)} 
-                className={`${btnSecCls} text-red-400 border-red-100`}
-              >
-                🗑️
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
-    );
-  }
-
-  // ===== PREVIEW ===== (diseño mejorado replicando nota física)
-  if (view === 'preview' && editNota) {
-    const n = editNota;
-    const rest = calcRest(n);
-    const filled = n.items.filter((i: NotaItem) => i.articulo);
-
-    return (
-      <div>
-        <div className="flex flex-wrap justify-between items-center gap-2 mb-4 no-print">
-          <button onClick={() => setView('form')} className={btnSecCls}>← Editar</button>
-          <div className="flex gap-2 flex-wrap">
-            <button onClick={printNota} className={btnSecCls}>🖨️ Imprimir</button>
-            <button 
-              onClick={() => shareWA(n)} 
-              className={`${btnCls} text-sm`} 
-              style={{ background: '#25D366' }}
-            >
-              💬 WhatsApp
-            </button>
-            <button 
-              onClick={handleSave} 
-              disabled={saving} 
-              className={`${btnCls} text-sm`} 
-              style={{ background: '#22C55E' }}
-            >
-              {saving ? '⏳' : '💾'} Guardar
-            </button>
-          </div>
-        </div>
-
-        {/* NOTA IMPRIMIBLE */}
-        <div 
-          id="nota-print" 
-          className="bg-white border-2 rounded-lg overflow-hidden mx-auto" 
-          style={{ borderColor: '#1a2744', maxWidth: '210mm', fontFamily: 'Nunito, sans-serif' }}
-        >
-          {/* Header */}
-          <div className="flex items-stretch" style={{ borderBottom: '2px solid #1a2744' }}>
-            <div 
-              className="px-4 py-2 font-extrabold text-sm text-white flex items-center" 
-              style={{ background: '#1a2744' }}
-            >
-              NOTA DE VENTA
-            </div>
-            <div className="flex items-center ml-auto">
-              {[['DÍA', n.dia], ['MES', n.mes], ['AÑO', n.anio]].map(([l, v]: string[]) => (
-                <div 
-                  key={l} 
-                  className="px-3 py-1.5 text-center" 
-                  style={{ borderLeft: '1.5px solid #1a2744' }}
-                >
-                  <div className="text-[9px] font-bold" style={{ color: '#1a2744' }}>{l}</div>
-                  <div className="text-base font-extrabold" style={{ color: '#1a2744' }}>{v}</div>
-                </div>
-              ))}
-            </div>
-          </div>
-
-          {/* Info con logo */}
-          <div className="p-4 flex gap-4" style={{ borderBottom: '1px solid #e5e7eb' }}>
-            <div className="text-center" style={{ width: '100px', flexShrink: 0 }}>
-              <div 
-                style={{ 
-                  width: '80px', 
-                  height: '80px', 
-                  borderRadius: '50%', 
-                  background: '#1a2744', 
-                  display: 'flex', 
-                  alignItems: 'center', 
-                  justifyContent: 'center', 
-                  margin: '0 auto', 
-                  marginBottom: '8px' 
-                }}
-              >
-                <div style={{ textAlign: 'center' }}>
-                  <div style={{ fontSize: '28px', lineHeight: '1' }}>🎀</div>
-                  <div 
-                    style={{ 
-                      fontSize: '20px', 
-                      fontWeight: '800', 
-                      color: 'white', 
-                      fontFamily: 'Playfair Display, serif', 
-                      fontStyle: 'italic', 
-                      marginTop: '2px' 
-                    }}
-                  >
-                    N
+          <div className="text-center py-16"><div className="text-4xl mb-3 animate-bounce">📋</div><p className="text-sm text-gray-400 font-body">Cargando...</p></div>
+        ) : (
+          <div className="space-y-3">
+            {filtered.map(n => (
+              <div key={n.id} className={`${cardCls} cursor-pointer hover:shadow-md transition-shadow`} onClick={() => puedeEditarNotas && handleEdit(n)}>
+                <div className="flex items-start justify-between mb-2">
+                  <div className="flex-1">
+                    <div className="flex items-center gap-2 flex-wrap mb-1">
+                      <span className="text-sm font-extrabold font-body" style={{ color: '#E91E8C' }}>{n.folio}</span>
+                      <StatusBadge status={n.status} />
+                      {n.asignadaNombre && (
+                        <span className="text-xs font-bold px-2 py-1 rounded font-body" style={{ 
+                          background: n.asignadaA === 'tere@nenasgiftshop.com' ? '#F3E8FF' : '#D1FAE5',
+                          color: n.asignadaA === 'tere@nenasgiftshop.com' ? '#9333EA' : '#10B981'
+                        }}>
+                          👤 {n.asignadaNombre}
+                        </span>
+                      )}
+                    </div>
+                    <div className="text-base font-bold font-body text-gray-800">{n.nombre}</div>
+                    <div className="text-xs text-gray-400 font-body">${parseFloat(n.total || '0').toLocaleString()}</div>
                   </div>
                 </div>
-              </div>
-              <div 
-                className="text-[10px] font-extrabold tracking-wider" 
-                style={{ color: '#1a2744' }}
-              >
-                GIFT SHOP
-              </div>
-            </div>
-            <div className="flex-1">
-              <div className="text-xs text-gray-600 mb-1">📍 Calle: Av. Del Trabajo #41 Plaza Valle</div>
-              <div className="text-xs text-gray-600 mb-2">Dorado H. Matamoros, Tamps.</div>
-              <div className="text-xs text-gray-600 mb-3">📞 (868) 162-7939</div>
-              <div className="border-2 rounded p-2 mb-2" style={{ borderColor: '#1a2744' }}>
-                <div className="flex justify-between items-center mb-1">
-                  <span className="text-xs font-bold" style={{ color: '#1a2744' }}>NOMBRE:</span>
-                  <span className="text-sm font-bold">{n.nombre}</span>
-                </div>
-                <div className="flex justify-between items-center">
-                  <span className="text-xs font-bold" style={{ color: '#1a2744' }}>TELÉFONO:</span>
-                  <span className="text-sm">{n.telefono}</span>
-                </div>
-              </div>
-              {n.evento && (
-                <div className="text-xs text-gray-500 italic">📝 Evento: {n.evento}</div>
-              )}
-            </div>
-          </div>
-
-          {/* Checkboxes canal */}
-          <div 
-            className="px-4 py-2 flex gap-4 items-center" 
-            style={{ background: '#f9fafb', borderBottom: '1px solid #e5e7eb' }}
-          >
-            {['FB', 'IG', 'WA', 'Local'].map(c => (
-              <label key={c} className="flex items-center gap-1.5 text-xs font-semibold">
-                <div 
-                  style={{ 
-                    width: '14px', 
-                    height: '14px', 
-                    border: '2px solid #1a2744', 
-                    borderRadius: '2px', 
-                    display: 'flex', 
-                    alignItems: 'center', 
-                    justifyContent: 'center', 
-                    background: n.canalVenta === c ? '#1a2744' : 'white' 
-                  }}
-                >
-                  {n.canalVenta === c && <span style={{ color: 'white', fontSize: '10px' }}>✓</span>}
-                </div>
-                {c}
-              </label>
-            ))}
-          </div>
-
-          {/* Tabla */}
-          <table className="w-full border-collapse" style={{ fontSize: '13px' }}>
-            <thead>
-              <tr style={{ background: '#1a2744', color: 'white' }}>
-                <th className="px-3 py-2 text-left font-bold" style={{ width: '60px' }}>CANT.</th>
-                <th className="px-3 py-2 text-left font-bold">ARTÍCULO</th>
-                <th className="px-3 py-2 text-center font-bold" style={{ width: '80px' }}>PRECIO</th>
-                <th className="px-3 py-2 text-center font-bold" style={{ width: '90px' }}>IMPORTE</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filled.map((it: NotaItem, i: number) => (
-                <tr key={i} style={{ borderBottom: '1px solid #e5e7eb' }}>
-                  <td className="px-3 py-1.5 text-center font-semibold">{it.cantidad}</td>
-                  <td className="px-3 py-1.5">
-                    {it.articulo}
-                    {it.detalles && (
-                      <div className="text-xs text-gray-500 italic mt-0.5">{it.detalles}</div>
-                    )}
-                  </td>
-                  <td className="px-3 py-1.5 text-center">
-                    {it.precio && `$${parseFloat(it.precio).toLocaleString()}`}
-                  </td>
-                  <td className="px-3 py-1.5 text-center font-bold">
-                    {it.importe && `$${parseFloat(it.importe).toLocaleString()}`}
-                  </td>
-                </tr>
-              ))}
-              {[...Array(Math.max(0, 10 - filled.length))].map((_, i) => (
-                <tr key={`empty-${i}`} style={{ borderBottom: '1px solid #f3f4f6' }}>
-                  <td className="px-3 py-1.5">&nbsp;</td>
-                  <td className="px-3 py-1.5"></td>
-                  <td className="px-3 py-1.5"></td>
-                  <td className="px-3 py-1.5"></td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-
-          {/* Footer con entregas y total */}
-          <div className="p-4" style={{ borderTop: '2px solid #1a2744' }}>
-            {n.entregas && n.entregas.length > 0 && (
-              <div className="mb-3">
-                <div className="text-xs font-bold mb-2" style={{ color: '#1a2744' }}>
-                  Fecha de entrega:
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {n.entregas.map((ent: EntregaFecha, ei: number) => {
-                    const col = entregaColors[ei];
-                    return (
-                      <div 
-                        key={ei} 
-                        className="px-3 py-1.5 rounded-md text-sm font-bold" 
-                        style={{ background: col.bg, color: col.text, border: `1.5px solid ${col.border}` }}
-                      >
-                        {ent.dia && ent.mes ? `${ent.dia} ${meses[parseInt(ent.mes)-1]}` : 'Por definir'}
-                        {ent.label && ` - ${ent.label}`}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-            )}
-
-            <div className="flex justify-end mb-3">
-              <div 
-                className="px-5 py-2 rounded-lg font-extrabold text-white text-lg" 
-                style={{ background: '#E91E8C' }}
-              >
-                TOTAL: ${parseFloat(n.total || '0').toLocaleString()}
-              </div>
-            </div>
-
-            <div className="grid grid-cols-3 gap-2 text-sm">
-              <div 
-                className="px-3 py-2 rounded text-center" 
-                style={{ background: '#1a2744', color: 'white' }}
-              >
-                <div className="text-xs font-bold mb-1">ANTICIPO:</div>
-                <div className="font-extrabold">
-                  {n.anticipo1 ? `$${parseFloat(n.anticipo1).toLocaleString()}` : '$0'}
-                </div>
-              </div>
-              <div 
-                className="px-3 py-2 rounded text-center" 
-                style={{ background: '#1a2744', color: 'white' }}
-              >
-                <div className="text-xs font-bold mb-1">ANTICIPO:</div>
-                <div className="font-extrabold">-</div>
-              </div>
-              <div 
-                className="px-3 py-2 rounded text-center" 
-                style={{ background: '#1a2744', color: 'white' }}
-              >
-                <div className="text-xs font-bold mb-1">RESTANTE:</div>
-                <div className="font-extrabold">${rest.toLocaleString()}</div>
-              </div>
-            </div>
-          </div>
-
-          {/* Footer info */}
-          <div 
-            className="px-4 py-2 text-center" 
-            style={{ background: '#fef3f8', borderTop: '1px solid #ffc0e0' }}
-          >
-            <div className="text-[10px] text-gray-600 mb-1">
-              Las compras son finales, no hay devoluciones de anticipo por cancelación.
-            </div>
-            <div className="flex items-center justify-center gap-3 text-xs text-gray-600">
-              <span>📷 @nenasgiftshop</span>
-              <span>📘 NENAS Gift Shop</span>
-            </div>
-            <div className="text-sm font-display italic mt-1" style={{ color: '#E91E8C' }}>
-              Gracias por tu preferencia ✨
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
-
-  // ===== FORM ===== (con todas las funcionalidades)
-  if (view === 'form' && editNota) {
-    const n = editNota;
-    
-    return (
-      <div>
-        <div className="flex flex-wrap justify-between items-center gap-2 mb-4">
-          <button 
-            onClick={() => { setView('list'); setEditNota(null); }} 
-            className={btnSecCls}
-          >
-            ← Volver
-          </button>
-          <div className="flex gap-2">
-            <button onClick={() => setView('preview')} className={btnSecCls}>
-              👁️ Preview
-            </button>
-            <button 
-              onClick={handleSave} 
-              disabled={saving} 
-              className={btnCls} 
-              style={{ background: 'linear-gradient(135deg, #FF69B4, #E91E8C)' }}
-            >
-              {saving ? '⏳ Guardando...' : '💾 Guardar'}
-            </button>
-          </div>
-        </div>
-
-        {/* Estado */}
-        <div className={cardCls}>
-          <div className="text-sm font-bold text-gray-800 mb-3 flex items-center gap-2">
-            📌 Estado · <span style={{ color: '#E91E8C' }}>{n.folio}</span>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            {(['pending', 'confirmed', 'preparing', 'delivered'] as const).map(s => (
-              <button 
-                key={s} 
-                onClick={() => updateField('status', s)} 
-                className={`px-3 py-2 rounded-lg text-xs font-bold border-2 cursor-pointer font-body transition-all ${
-                  n.status === s ? 'border-nenas-600' : 'border-gray-100'
-                }`} 
-                style={{ 
-                  background: n.status === s ? '#FFF0F5' : 'white', 
-                  color: n.status === s ? '#E91E8C' : '#999' 
-                }}
-              >
-                <StatusBadge status={s} />
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* Fecha y Canal */}
-        <div className={cardCls}>
-          <div className="text-sm font-bold text-gray-800 mb-3">📅 Fecha y Canal</div>
-          <div className="grid grid-cols-3 gap-2.5 mb-3">
-            {[['Día', 'dia'], ['Mes', 'mes'], ['Año', 'anio']].map(([l, f]) => (
-              <div key={f}>
-                <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1">
-                  {l}
-                </label>
-                <input 
-                  value={(n as any)[f]} 
-                  onChange={e => updateField(f, e.target.value)} 
-                  className={inputSmCls} 
-                />
-              </div>
-            ))}
-          </div>
-          <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1">
-            Canal
-          </label>
-          <div className="flex gap-2">
-            {canales.map(c => (
-              <button 
-                key={c} 
-                onClick={() => updateField('canalVenta', c)} 
-                className={`flex-1 py-2.5 rounded-xl text-sm font-bold cursor-pointer font-body border-2 transition-all ${
-                  n.canalVenta === c 
-                    ? 'border-nenas-600 bg-nenas-50 text-nenas-600' 
-                    : 'border-gray-100 bg-white text-gray-400'
-                }`}
-              >
-                {c}
-              </button>
-            ))}
-          </div>
-        </div>
-
-        {/* 🆕 Cliente con dropdown */}
-        <div className={cardCls}>
-          <div className="text-sm font-bold text-gray-800 mb-3">👤 Cliente</div>
-          
-          {clientes.length > 0 && (
-            <div className="mb-3">
-              <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1">
-                Seleccionar Cliente Existente
-              </label>
-              <select 
-                onChange={(e) => {
-                  if (e.target.value) {
-                    const cliente = clientes.find(c => c.id === e.target.value);
-                    if (cliente) selectCliente(cliente);
-                  }
-                }}
-                className={inputCls}
-                value=""
-              >
-                <option value="">-- Buscar cliente --</option>
-                {clientes.map(cliente => (
-                  <option key={cliente.id} value={cliente.id}>
-                    {cliente.nombre} {cliente.telefono && `- ${cliente.telefono}`}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
-
-          <div className="mb-2.5">
-            <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1">
-              Nombre
-            </label>
-            <input 
-              value={n.nombre} 
-              onChange={e => updateField('nombre', e.target.value)} 
-              placeholder="Nombre del cliente" 
-              className={inputCls} 
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-2.5">
-            <div>
-              <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1">
-                Teléfono
-              </label>
-              <input 
-                value={n.telefono} 
-                onChange={e => updateField('telefono', e.target.value)} 
-                placeholder="(868) 000-0000" 
-                className={inputCls} 
-              />
-            </div>
-            <div>
-              <label className="text-[11px] font-bold text-gray-400 uppercase tracking-wider block mb-1">
-                Evento
-              </label>
-              <input 
-                value={n.evento} 
-                onChange={e => updateField('evento', e.target.value)} 
-                placeholder="Opcional" 
-                className={inputCls} 
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Entregas */}
-        <div className={cardCls}>
-          <div className="flex justify-between items-center mb-3">
-            <span className="text-sm font-bold text-gray-800">🚚 Fechas de Entrega</span>
-            {n.entregas.length < 3 && (
-              <button 
-                onClick={addEntrega} 
-                className="bg-nenas-50 border border-nenas-200 rounded-lg px-3 py-1 text-xs font-bold text-nenas-600 cursor-pointer font-body"
-              >
-                + Fecha
-              </button>
-            )}
-          </div>
-          <p className="text-xs text-gray-400 mb-3">Hasta 3 fechas. Asigna artículos a cada una.</p>
-          {n.entregas.map((ent: EntregaFecha, idx: number) => { 
-            const col = entregaColors[idx]; 
-            return (
-              <div 
-                key={idx} 
-                className="rounded-xl p-3 mb-2" 
-                style={{ background: col.bg, border: `1.5px solid ${col.border}` }}
-              >
-                <div className="flex items-center gap-2 mb-2">
-                  <span 
-                    className="w-5 h-5 rounded flex items-center justify-center text-white text-[11px] font-extrabold" 
-                    style={{ background: col.dot }}
-                  >
-                    {idx + 1}
-                  </span>
-                  <span className="text-sm font-bold" style={{ color: col.text }}>
-                    Entrega {idx + 1}
-                  </span>
-                  {n.entregas.length > 1 && (
-                    <button 
-                      onClick={() => removeEntrega(idx)} 
-                      className="ml-auto bg-transparent border-none cursor-pointer text-lg opacity-50" 
-                      style={{ color: col.text }}
-                    >
-                      ×
-                    </button>
+                <div className="flex gap-2" onClick={e => e.stopPropagation()}>
+                  {puedeVerAuditoriaCompleta && n.id && (
+                    <button onClick={() => verHistorial(n.id!)} className={btnSecCls}>📜 Historial</button>
+                  )}
+                  {puedeEliminarNotas && n.id && (
+                    <button onClick={() => handleDelete(n.id!)} className={`${btnSecCls} text-red-400`}>🗑️</button>
                   )}
                 </div>
-                <div className="grid grid-cols-4 gap-1.5">
-                  <div>
-                    <label className="text-[10px] font-bold text-gray-400 block mb-0.5">Día</label>
-                    <input 
-                      value={ent.dia} 
-                      onChange={e => updateEntrega(idx, 'dia', e.target.value)} 
-                      placeholder="22" 
-                      className={`${inputSmCls} bg-white`} 
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold text-gray-400 block mb-0.5">Mes</label>
-                    <input 
-                      value={ent.mes} 
-                      onChange={e => updateEntrega(idx, 'mes', e.target.value)} 
-                      placeholder="04" 
-                      className={`${inputSmCls} bg-white`} 
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold text-gray-400 block mb-0.5">Año</label>
-                    <input 
-                      value={ent.anio} 
-                      onChange={e => updateEntrega(idx, 'anio', e.target.value)} 
-                      placeholder="2026" 
-                      className={`${inputSmCls} bg-white`} 
-                    />
-                  </div>
-                  <div>
-                    <label className="text-[10px] font-bold text-gray-400 block mb-0.5">Desc.</label>
-                    <input 
-                      value={ent.label} 
-                      onChange={e => updateEntrega(idx, 'label', e.target.value)} 
-                      placeholder="Ej: Invitaciones" 
-                      className={`${inputSmCls} bg-white text-left`} 
-                    />
-                  </div>
-                </div>
               </div>
-            ); 
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // FORM
+  if (view === 'form' && editNota) {
+    const n = editNota;
+    return (
+      <div className="p-4 max-w-4xl mx-auto">
+        <div className="flex justify-between mb-4">
+          <button onClick={() => { setView('list'); setEditNota(null); }} className={btnSecCls}>← Volver</button>
+          <button onClick={handleSave} disabled={saving} className={btnCls} style={{ background: '#E91E8C' }}>
+            {saving ? '⏳ Guardando...' : '💾 Guardar'}
+          </button>
+        </div>
+
+        {puedeAsignarNotas && (
+          <div className={cardCls}>
+            <div className="text-sm font-bold mb-3 font-body text-gray-700">👤 Asignada a:</div>
+            <div className="flex gap-2 flex-wrap">
+              {[
+                { value: '', label: 'Sin asignar' },
+                { value: 'tere@nenasgiftshop.com', label: 'Tere' },
+                { value: 'cinthia@nenasgiftshop.com', label: 'Cinthia' },
+              ].map(opt => (
+                <button
+                  key={opt.value}
+                  onClick={() => { updateField('asignadaA', opt.value); updateField('asignadaNombre', opt.label); }}
+                  className={`flex-1 py-2 rounded-lg font-bold text-sm font-body transition-all ${
+                    n.asignadaA === opt.value 
+                      ? 'bg-nenas-600 text-white shadow-md' 
+                      : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                  }`}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        <div className={cardCls}>
+          <div className="text-sm font-bold mb-3 font-body text-gray-700">👤 Cliente</div>
+          {clientes.length > 0 && (
+            <select 
+              onChange={e => { const c = clientes.find(cl => cl.id === e.target.value); if (c) selectCliente(c); }} 
+              className={inputCls + " mb-2"}
+            >
+              <option value="">-- Seleccionar cliente existente --</option>
+              {clientes.map(c => <option key={c.id} value={c.id}>{c.nombre} {c.telefono && `(${c.telefono})`}</option>)}
+            </select>
+          )}
+          <input value={n.nombre} onChange={e => updateField('nombre', e.target.value)} placeholder="Nombre del cliente" className={inputCls + " mb-2"} />
+          <input value={n.telefono} onChange={e => updateField('telefono', e.target.value)} placeholder="Teléfono" className={inputCls} />
+        </div>
+
+        {/* Fechas de Entrega PRIMERO */}
+        <div className={cardCls}>
+          <div className="flex justify-between items-center mb-3">
+            <span className="text-sm font-bold font-body text-gray-700">🚚 Fechas de Entrega</span>
+            {n.entregas.length < 3 && (
+              <button onClick={addEntrega} className="text-xs bg-purple-50 text-purple-600 px-3 py-1.5 rounded-lg font-semibold font-body hover:bg-purple-100">+ Agregar</button>
+            )}
+          </div>
+          {n.entregas.map((ent: EntregaFecha, ei: number) => {
+            const cfg = entregaColors[ei] || entregaColors[0];
+            return (
+              <div key={ei} className="p-3 rounded-xl mb-2 border-2" style={{ background: cfg.bg, borderColor: cfg.border }}>
+                <div className="flex gap-2 items-center mb-2">
+                  <span className="text-xs font-bold font-body" style={{ color: cfg.text }}>Entrega {ei + 1}:</span>
+                  {n.entregas.length > 1 && (
+                    <button onClick={() => removeEntrega(ei)} className="ml-auto text-gray-400 hover:text-red-500 text-lg">×</button>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-2 mb-2">
+                  <input value={ent.dia} onChange={e => updateEntrega(ei, 'dia', e.target.value)} placeholder="Día" className={inputSmCls} />
+                  <select value={ent.mes} onChange={e => updateEntrega(ei, 'mes', e.target.value)} className={inputSmCls}>
+                    <option value="">Mes</option>
+                    {meses.map((m, mi) => <option key={mi} value={String(mi + 1).padStart(2, '0')}>{m}</option>)}
+                  </select>
+                  <input value={ent.anio} onChange={e => updateEntrega(ei, 'anio', e.target.value)} placeholder="Año" className={inputSmCls} />
+                </div>
+                <input 
+                  value={ent.label || ''} 
+                  onChange={e => updateEntrega(ei, 'label', e.target.value)} 
+                  placeholder="Etiqueta (ej: Mañana, Tarde...)" 
+                  className={inputCls} 
+                />
+              </div>
+            );
           })}
         </div>
 
-        {/* 🆕 ARTÍCULOS CON DETALLES Y FOTOS */}
+        {/* Productos CON selector de entrega */}
         <div className={cardCls}>
           <div className="flex justify-between items-center mb-3">
-            <span className="text-sm font-bold text-gray-800">📦 Artículos</span>
-            <button 
-              onClick={addItem} 
-              className="bg-nenas-50 border border-nenas-200 rounded-lg px-3 py-1 text-xs font-bold text-nenas-600 cursor-pointer font-body"
-            >
-              + Agregar
-            </button>
+            <span className="text-sm font-bold font-body text-gray-700">📦 Artículos</span>
+            <button onClick={addItem} className="text-xs bg-nenas-50 text-nenas-600 px-3 py-1.5 rounded-lg font-semibold font-body hover:bg-nenas-100">+ Agregar</button>
           </div>
-          
-          {n.items.map((item: NotaItem, idx: number) => (
-            <div key={idx} className="p-3 bg-gray-50 rounded-xl border border-gray-100 mb-3">
-              {/* Fila principal */}
-              <div className="grid gap-2 items-center mb-2" style={{ gridTemplateColumns: '50px 1fr 70px 70px 24px' }}>
-                <input 
-                  value={item.cantidad} 
-                  onChange={e => updateItem(idx, 'cantidad', e.target.value)} 
-                  placeholder="Cnt" 
-                  type="number" 
-                  className={inputSmCls} 
-                />
-                
-                <div className="relative">
+          {n.items.map((item: NotaItem, i: number) => {
+            const entIdx = (item.entrega || 1) - 1;
+            const cfg = entregaColors[entIdx] || entregaColors[0];
+            return (
+              <div key={i} className="p-3 rounded-xl mb-3 border-2" style={{ background: cfg.bg, borderColor: cfg.border }}>
+                <div className="grid gap-2 mb-2" style={{ gridTemplateColumns: '50px 1fr 70px 80px 70px 30px' }}>
+                  <input value={item.cantidad} onChange={e => updateItem(i, 'cantidad', e.target.value)} placeholder="Cnt" className={inputSmCls} />
                   <input 
                     value={item.articulo} 
-                    onChange={e => updateItem(idx, 'articulo', e.target.value)} 
-                    placeholder="Producto (empieza a escribir)" 
-                    className={`${inputSmCls} text-left`}
-                    list={`productos-${idx}`}
+                    onChange={e => updateItem(i, 'articulo', e.target.value)} 
+                    placeholder="Producto" 
+                    list={`productos-${i}`} 
+                    className={inputSmCls + " text-left pl-3"} 
                   />
-                  <datalist id={`productos-${idx}`}>
-                    {productos.map(prod => (
-                      <option key={prod.id} value={prod.nombre}>
-                        {prod.nombre} - ${prod.precio}
-                      </option>
-                    ))}
+                  <datalist id={`productos-${i}`}>
+                    {productos.map(p => <option key={p.id} value={p.nombre} />)}
                   </datalist>
+                  <input value={item.precio} onChange={e => updateItem(i, 'precio', e.target.value)} placeholder="$" className={inputSmCls} />
+                  <div className="p-2 bg-white rounded text-xs font-bold text-center font-body" style={{ color: cfg.text }}>
+                    {item.importe ? `$${parseFloat(item.importe).toLocaleString()}` : '—'}
+                  </div>
+                  <select value={item.entrega || 1} onChange={e => updateItem(i, 'entrega', parseInt(e.target.value))} className="p-1 rounded text-xs border font-bold text-center" style={{ background: cfg.bg, borderColor: cfg.border, color: cfg.text }}>
+                    {n.entregas.map((_: any, ei: number) => (
+                      <option key={ei} value={ei + 1}>E{ei + 1}</option>
+                    ))}
+                  </select>
+                  {n.items.length > 1 && (
+                    <button onClick={() => removeItem(i)} className="text-gray-400 hover:text-red-500 text-xl leading-none">×</button>
+                  )}
                 </div>
-
-                <input 
-                  value={item.precio} 
-                  onChange={e => updateItem(idx, 'precio', e.target.value)} 
-                  placeholder="$" 
-                  type="number" 
-                  className={inputSmCls} 
-                />
                 
-                <div className="p-2 rounded-lg bg-gray-100 text-xs font-bold text-gray-700 text-center">
-                  {item.importe ? `$${parseFloat(item.importe).toLocaleString()}` : '—'}
-                </div>
-                
-                <button 
-                  onClick={() => removeItem(idx)} 
-                  className="bg-transparent border-none cursor-pointer text-gray-300 text-base"
-                >
-                  ×
-                </button>
-              </div>
-
-              {/* 🆕 Botones rápidos de productos */}
-              {productos.length > 0 && item.articulo === '' && (
-                <div className="flex flex-wrap gap-1 mb-2">
-                  <span className="text-[10px] text-gray-400 font-semibold w-full mb-1">
-                    Productos frecuentes:
-                  </span>
-                  {productos.slice(0, 5).map(prod => (
-                    <button 
-                      key={prod.id}
-                      onClick={() => selectProducto(idx, prod)}
-                      className="px-2 py-1 rounded text-[10px] font-bold bg-white border border-gray-200 hover:border-nenas-400 hover:bg-nenas-50 transition-all"
-                    >
-                      {prod.nombre}
-                    </button>
-                  ))}
-                </div>
-              )}
-
-              {/* 🆕 Campo de detalles */}
-              <div className="mb-2">
-                <label className="text-[10px] font-bold text-gray-400 block mb-1">
-                  📝 Especificaciones del cliente:
-                </label>
                 <textarea 
                   value={item.detalles || ''} 
-                  onChange={e => updateItem(idx, 'detalles', e.target.value)} 
-                  placeholder="Ej: Color rosa, tamaño mediano, con nombre..."
-                  rows={2}
-                  className="w-full p-2 rounded-lg border border-gray-200 text-xs outline-none bg-white resize-none"
+                  onChange={e => updateItem(i, 'detalles', e.target.value)} 
+                  placeholder="📝 Especificaciones (color, tamaño, personalización...)" 
+                  rows={2} 
+                  className="w-full p-2 rounded-lg text-xs border-2 mb-2 font-body outline-none focus:border-nenas-400" 
+                  style={{ borderColor: cfg.border }}
                 />
-              </div>
-
-              {/* 🆕 Fotos */}
-              <div className="mb-2">
-                <div className="flex items-center justify-between mb-2">
-                  <label className="text-[10px] font-bold text-gray-400">
-                    📸 Fotos de referencia:
-                  </label>
-                  <div className="flex gap-1">
-                    <button
-                      onClick={() => fileInputRefs.current[`file-${idx}`]?.click()}
-                      disabled={uploadingFoto === `item-${idx}`}
-                      className="px-2 py-1 rounded text-[10px] font-bold bg-nenas-50 border border-nenas-200 text-nenas-600 disabled:opacity-50"
-                    >
-                      {uploadingFoto === `item-${idx}` ? '⏳' : '📁'} Subir
-                    </button>
-                    <button
-                      onClick={() => cameraInputRefs.current[`cam-${idx}`]?.click()}
-                      disabled={uploadingFoto === `item-${idx}`}
-                      className="px-2 py-1 rounded text-[10px] font-bold bg-blue-50 border border-blue-200 text-blue-600 disabled:opacity-50"
-                    >
-                      📷 Cámara
-                    </button>
-                  </div>
-                  <input
-                    ref={el => fileInputRefs.current[`file-${idx}`] = el}
-                    type="file"
-                    accept="image/*"
-                    multiple
-                    className="hidden"
-                    onChange={e => handleFileSelect(idx, e.target.files)}
-                  />
-                  <input
-                    ref={el => cameraInputRefs.current[`cam-${idx}`] = el}
-                    type="file"
-                    accept="image/*"
-                    capture="environment"
-                    className="hidden"
-                    onChange={e => handleFileSelect(idx, e.target.files)}
-                  />
-                </div>
                 
-                {item.fotos && item.fotos.length > 0 && (
-                  <div className="flex flex-wrap gap-2">
-                    {item.fotos.map((foto: string, fi: number) => (
-                      <div key={fi} className="relative group">
-                        <img 
-                          src={foto} 
-                          alt={`Foto ${fi + 1}`} 
-                          className="w-20 h-20 object-cover rounded border-2 border-gray-200"
-                        />
-                        <div className="absolute inset-0 bg-black bg-opacity-50 opacity-0 group-hover:opacity-100 transition-opacity rounded flex items-center justify-center gap-1">
-                          <button
-                            onClick={() => downloadFoto(foto, `${item.articulo}_${fi + 1}.jpg`)}
-                            className="p-1 bg-white rounded text-xs"
-                          >
-                            ⬇️
-                          </button>
-                          <button
-                            onClick={() => handleDeleteFoto(idx, foto)}
-                            className="p-1 bg-red-500 text-white rounded text-xs"
-                          >
-                            🗑️
-                          </button>
-                        </div>
+                {n.id && (
+                  <div>
+                    <div className="flex gap-2 mb-2">
+                      <button 
+                        onClick={() => fileInputRefs.current[`file-${i}`]?.click()} 
+                        disabled={uploadingFoto === `item-${i}`} 
+                        className="text-xs px-3 py-1.5 bg-blue-50 text-blue-600 rounded-lg font-semibold font-body hover:bg-blue-100 disabled:opacity-50"
+                      >
+                        {uploadingFoto === `item-${i}` ? '⏳' : '📁 Fotos'}
+                      </button>
+                      <button 
+                        onClick={() => cameraInputRefs.current[`cam-${i}`]?.click()} 
+                        disabled={uploadingFoto === `item-${i}`} 
+                        className="text-xs px-3 py-1.5 bg-green-50 text-green-600 rounded-lg font-semibold font-body hover:bg-green-100 disabled:opacity-50"
+                      >
+                        📷
+                      </button>
+                    </div>
+                    <input 
+                      ref={el => fileInputRefs.current[`file-${i}`] = el} 
+                      type="file" 
+                      accept="image/*" 
+                      multiple 
+                      className="hidden" 
+                      onChange={e => handleFileSelect(i, e.target.files)} 
+                    />
+                    <input 
+                      ref={el => cameraInputRefs.current[`cam-${i}`] = el} 
+                      type="file" 
+                      accept="image/*" 
+                      capture="environment" 
+                      className="hidden" 
+                      onChange={e => handleFileSelect(i, e.target.files)} 
+                    />
+                    
+                    {item.fotos && item.fotos.length > 0 && (
+                      <div className="flex gap-2 flex-wrap">
+                        {item.fotos.map((foto: string, fi: number) => (
+                          <div key={fi} className="relative group">
+                            <img src={foto} className="w-16 h-16 object-cover rounded-lg border-2" style={{ borderColor: cfg.border }} alt="" />
+                            <div className="absolute inset-0 bg-black bg-opacity-60 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center gap-2 rounded-lg">
+                              <button onClick={() => downloadFoto(foto, `foto-${fi + 1}.jpg`)} className="text-white text-lg">⬇️</button>
+                              <button onClick={() => handleDeleteFoto(i, foto)} className="text-red-400 text-lg">🗑️</button>
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    ))}
+                    )}
                   </div>
                 )}
+                {!n.id && (
+                  <div className="text-xs text-gray-500 font-body mt-2">💡 Guarda la nota para subir fotos</div>
+                )}
               </div>
-
-              {/* Asignar a entrega */}
-              {n.entregas.length > 1 && (
-                <div className="flex gap-1 items-center flex-wrap">
-                  <span className="text-[10px] text-gray-400 font-semibold">Entrega:</span>
-                  {n.entregas.map((ent: EntregaFecha, ei: number) => { 
-                    const col = entregaColors[ei]; 
-                    const sel = item.entrega === ei + 1; 
-                    return (
-                      <button 
-                        key={ei} 
-                        onClick={() => updateItem(idx, 'entrega', ei + 1)} 
-                        className="flex items-center gap-1 px-2 py-1 rounded text-[10px] font-bold cursor-pointer font-body" 
-                        style={{ 
-                          border: sel ? `2px solid ${col.dot}` : '1.5px solid #E0E0E0', 
-                          background: sel ? col.bg : 'white', 
-                          color: sel ? col.text : '#aaa' 
-                        }}
-                      >
-                        <span 
-                          className="w-3 h-3 rounded-sm flex items-center justify-center text-white text-[8px] font-extrabold" 
-                          style={{ background: sel ? col.dot : '#ddd' }}
-                        >
-                          {ei + 1}
-                        </span>
-                        {ent.label || fmtEntLabel(ent, ei)}
-                      </button>
-                    ); 
-                  })}
-                </div>
-              )}
+            );
+          })}
+          
+          <div className="bg-gradient-to-r from-nenas-50 to-pink-50 p-3 rounded-xl mt-3 border border-nenas-100">
+            <div className="flex justify-between items-center">
+              <span className="text-sm font-bold font-body text-gray-700">💰 Total:</span>
+              <span className="text-2xl font-extrabold font-body text-nenas-600">
+                ${parseFloat(n.total || '0').toLocaleString()}
+              </span>
             </div>
-          ))}
+          </div>
         </div>
 
-        {/* Notas y Pago */}
         <div className={cardCls}>
-          <div className="text-sm font-bold text-gray-800 mb-3">📝 Notas</div>
-          <textarea 
-            value={n.notas} 
-            onChange={e => updateField('notas', e.target.value)} 
-            placeholder="Notas adicionales..." 
-            rows={2} 
-            className={`${inputCls} resize-y`} 
-          />
-        </div>
-        
-        <div className={cardCls}>
-          <div className="text-sm font-bold text-gray-800 mb-3">💰 Pago</div>
-          <div className="grid grid-cols-3 gap-2.5">
+          <div className="text-sm font-bold mb-3 font-body text-gray-700">💳 Información de Pago</div>
+          <div className="grid grid-cols-3 gap-3">
             <div>
-              <label className="text-[11px] font-bold text-gray-400 uppercase block mb-1">Total</label>
-              <input 
-                value={n.total} 
-                onChange={e => updateField('total', e.target.value)} 
-                placeholder="$0" 
-                type="number" 
-                className={`${inputSmCls} font-extrabold text-base`} 
-                style={{ color: '#E91E8C' }} 
-              />
+              <label className="text-xs text-gray-500 font-body mb-1 block">Total</label>
+              <input value={n.total} onChange={e => updateField('total', e.target.value)} placeholder="0.00" className={inputSmCls} />
             </div>
             <div>
-              <label className="text-[11px] font-bold text-gray-400 uppercase block mb-1">Anticipo</label>
-              <input 
-                value={n.anticipo1} 
-                onChange={e => updateField('anticipo1', e.target.value)} 
-                placeholder="$0" 
-                type="number" 
-                className={inputSmCls} 
-              />
+              <label className="text-xs text-gray-500 font-body mb-1 block">Anticipo</label>
+              <input value={n.anticipo1} onChange={e => updateField('anticipo1', e.target.value)} placeholder="0.00" className={inputSmCls} />
             </div>
             <div>
-              <label className="text-[11px] font-bold text-gray-400 uppercase block mb-1">Restante</label>
-              <div 
-                className="p-2 rounded-lg text-base font-extrabold text-center" 
-                style={{ background: '#EEF0FF', color: '#3B4FA0' }}
-              >
+              <label className="text-xs text-gray-500 font-body mb-1 block">Restante</label>
+              <div className="p-2 rounded-lg bg-blue-50 text-center font-bold text-sm font-body text-blue-600">
                 ${calcRest(n).toLocaleString()}
               </div>
             </div>
           </div>
         </div>
 
-        <div className="grid grid-cols-2 gap-2.5">
-          <button 
-            onClick={() => setView('preview')} 
-            className={`${btnCls} w-full`} 
-            style={{ background: 'white', color: '#E91E8C', border: '2px solid #E91E8C', boxShadow: 'none' }}
-          >
-            👁️ Vista Previa
-          </button>
-          <button 
-            onClick={handleSave} 
-            disabled={saving} 
-            className={`${btnCls} w-full`} 
-            style={{ background: 'linear-gradient(135deg, #FF69B4, #E91E8C)' }}
-          >
-            {saving ? '⏳' : '💾'} Guardar
+        <div className={cardCls}>
+          <div className="text-sm font-bold mb-3 font-body text-gray-700">📝 Notas Adicionales</div>
+          <textarea 
+            value={n.notas || ''} 
+            onChange={e => updateField('notas', e.target.value)} 
+            placeholder="Instrucciones especiales, detalles del pedido..." 
+            rows={3} 
+            className="w-full p-3 rounded-lg border-2 border-gray-100 text-sm font-body outline-none focus:border-nenas-400" 
+          />
+        </div>
+
+        <div className="flex justify-end">
+          <button onClick={handleSave} disabled={saving} className={btnCls} style={{ background: 'linear-gradient(135deg, #E91E8C, #FF69B4)', fontSize: '16px', padding: '12px 32px' }}>
+            {saving ? '⏳ Guardando...' : '💾 Guardar Nota'}
           </button>
         </div>
       </div>

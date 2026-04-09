@@ -2,9 +2,11 @@
 
 import { useState, useEffect } from 'react';
 import { useRouter, usePathname } from 'next/navigation';
-import { useAuth } from '@/hooks/useAuth';
+import { useAuth } from '@/contexts/AuthContext';
 import { useWidth } from '@/hooks/useWidth';
 import Link from 'next/link';
+import { signOut } from 'firebase/auth';
+import { auth } from '@/lib/firebase';
 
 const navItems = [
   { href: '/dashboard', label: 'Inicio', icon: '🏠', mobileLabel: 'Inicio' },
@@ -16,11 +18,20 @@ const navItems = [
 ];
 
 export default function DashboardLayout({ children }: { children: React.ReactNode }) {
-  const { user, loading, logout } = useAuth();
+  const { user, loading } = useAuth();
   const router = useRouter();
   const pathname = usePathname();
   const { isDesktop } = useWidth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  const logout = async () => {
+    try {
+      await signOut(auth);
+      router.push('/');
+    } catch (e) {
+      console.error('Error logging out:', e);
+    }
+  };
 
   useEffect(() => {
     if (!loading && !user) {

@@ -1,94 +1,119 @@
 'use client';
-
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { useAuth } from '@/hooks/useAuth';
+import { signInWithEmailAndPassword } from 'firebase/auth';
+import { auth } from '@/lib/firebase';
+import { useAuth } from '@/contexts/AuthContext';
 
 export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
-  const { login, error, user } = useAuth();
+  const [error, setError] = useState('');
+  const { user } = useAuth();
   const router = useRouter();
 
   // Redirect if already logged in
-  if (user) {
-    router.push('/dashboard');
-    return null;
-  }
+  useEffect(() => {
+    if (user) {
+      router.push('/dashboard');
+    }
+  }, [user, router]);
 
   const handleLogin = async () => {
     if (!email || !password) return;
     setLoading(true);
+    setError('');
+    
     try {
-      await login(email, password);
+      await signInWithEmailAndPassword(auth, email, password);
       router.push('/dashboard');
-    } catch (e) {
-      // Error handled in AuthContext
+    } catch (e: any) {
+      console.error('Login error:', e);
+      if (e.code === 'auth/invalid-credential' || e.code === 'auth/wrong-password') {
+        setError('Correo o contraseña incorrectos');
+      } else if (e.code === 'auth/user-not-found') {
+        setError('Usuario no encontrado');
+      } else if (e.code === 'auth/too-many-requests') {
+        setError('Demasiados intentos. Intenta más tarde');
+      } else {
+        setError('Error al iniciar sesión. Intenta de nuevo');
+      }
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center px-5"
-      style={{ background: 'linear-gradient(135deg, #FFF0F5 0%, #FFE4F0 30%, #FFDBE8 60%, #FFC0D6 100%)' }}>
-      <div className="bg-white rounded-3xl p-10 sm:p-12 shadow-xl max-w-md w-full text-center"
-        style={{ boxShadow: '0 20px 60px rgba(255, 105, 180, 0.15), 0 4px 20px rgba(0,0,0,0.06)' }}>
-        
-        <div className="text-5xl mb-2">🎀</div>
-        <h1 className="font-display text-3xl font-bold text-gray-800 mb-1">Nenas Gift Shop</h1>
-        <p className="text-gray-400 text-sm mb-8">Panel de Administración</p>
-
-        {error && (
-          <div className="bg-red-50 border border-red-200 rounded-xl p-3 mb-5 text-red-600 text-sm">
-            {error}
+    <div className="min-h-screen bg-gradient-to-br from-pink-50 via-purple-50 to-blue-50 flex items-center justify-center p-4">
+      <div className="w-full max-w-md">
+        <div className="bg-white rounded-3xl shadow-2xl p-8 border border-gray-100">
+          {/* Logo */}
+          <div className="text-center mb-8">
+            <div className="inline-flex items-center justify-center w-20 h-20 rounded-full bg-gradient-to-br from-pink-400 to-purple-500 mb-4 shadow-lg">
+              <span className="text-4xl">🎀</span>
+            </div>
+            <h1 className="text-3xl font-extrabold text-gray-800 mb-1">Nenas Gift Shop</h1>
+            <p className="text-sm text-gray-500">Sistema de Administración</p>
           </div>
-        )}
 
-        <div className="text-left mb-4">
-          <label className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1 block">
-            Correo electrónico
-          </label>
-          <input
-            type="email"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="tu@email.com"
-            className="w-full p-3.5 rounded-xl border-2 border-gray-100 text-sm outline-none bg-gray-50 transition-all"
-            onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
-          />
+          {/* Form */}
+          <div className="space-y-4">
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Correo Electrónico
+              </label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="usuario@nenasgiftshop.com"
+                className="w-full px-4 py-3 rounded-xl border-2 border-gray-200 outline-none focus:border-pink-400 transition-colors text-gray-800"
+                onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
+              />
+            </div>
+
+            <div>
+              <label className="block text-sm font-semibold text-gray-700 mb-2">
+                Contraseña
+              </label>
+              <input
+                type="password"
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                placeholder="••••••••"
+                className="w-full px-4 py-3 rounded-xl border-2 border-gray-200 outline-none focus:border-pink-400 transition-colors text-gray-800"
+                onKeyPress={(e) => e.key === 'Enter' && handleLogin()}
+              />
+            </div>
+
+            {error && (
+              <div className="bg-red-50 border border-red-200 rounded-xl p-3 text-sm text-red-600">
+                {error}
+              </div>
+            )}
+
+            <button
+              onClick={handleLogin}
+              disabled={loading || !email || !password}
+              className="w-full py-3 rounded-xl bg-gradient-to-r from-pink-500 to-purple-500 text-white font-bold text-lg shadow-lg hover:shadow-xl transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {loading ? (
+                <span className="flex items-center justify-center gap-2">
+                  <span className="animate-spin">⏳</span>
+                  Iniciando sesión...
+                </span>
+              ) : (
+                'Iniciar Sesión'
+              )}
+            </button>
+          </div>
+
+          {/* Footer */}
+          <div className="mt-6 text-center text-xs text-gray-400">
+            <p>Sistema protegido con Firebase Auth</p>
+          </div>
         </div>
-
-        <div className="text-left mb-6">
-          <label className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1 block">
-            Contraseña
-          </label>
-          <input
-            type="password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            placeholder="••••••••"
-            className="w-full p-3.5 rounded-xl border-2 border-gray-100 text-sm outline-none bg-gray-50 transition-all"
-            onKeyDown={(e) => e.key === 'Enter' && handleLogin()}
-          />
-        </div>
-
-        <button
-          onClick={handleLogin}
-          disabled={loading}
-          className="w-full p-3.5 rounded-xl border-none text-white text-base font-bold cursor-pointer btn-primary transition-all disabled:opacity-60"
-          style={{
-            background: 'linear-gradient(135deg, #FF69B4, #E91E8C)',
-            boxShadow: '0 4px 15px rgba(233, 30, 140, 0.35)',
-          }}
-        >
-          {loading ? '⏳ Verificando...' : 'Iniciar Sesión'}
-        </button>
-
-        <p className="text-gray-300 text-xs mt-6">
-          Conectado a Firebase · Vercel · GitHub
-        </p>
       </div>
     </div>
   );
