@@ -12,8 +12,8 @@ import {
   Timestamp,
   serverTimestamp,
 } from 'firebase/firestore';
-import { ref, uploadBytes, getDownloadURL, deleteObject } from 'firebase/storage';
-import { db, storage } from './firebase';
+import { db } from './firebase';
+import { uploadToCloudinary, deleteFromCloudinary } from './cloudinary';
 import { Nota, Cliente, Producto, AuditLog } from '@/types';
 
 // ==================== AUDITORÍA ====================
@@ -203,13 +203,7 @@ export async function asignarNota(
 // ==================== FOTOS ====================
 export async function uploadProductoFoto(file: File, notaId: string, itemIndex: number): Promise<string> {
   try {
-    const timestamp = Date.now();
-    const fileName = `${notaId}_item${itemIndex}_${timestamp}_${file.name}`;
-    const storageRef = ref(storage, `notas/${notaId}/${fileName}`);
-    
-    await uploadBytes(storageRef, file);
-    const url = await getDownloadURL(storageRef);
-    
+    const url = await uploadToCloudinary(file, notaId, itemIndex);
     return url;
   } catch (error) {
     console.error('Error uploading foto:', error);
@@ -219,8 +213,7 @@ export async function uploadProductoFoto(file: File, notaId: string, itemIndex: 
 
 export async function deleteFoto(url: string): Promise<void> {
   try {
-    const storageRef = ref(storage, url);
-    await deleteObject(storageRef);
+    await deleteFromCloudinary(url);
   } catch (error) {
     console.error('Error deleting foto:', error);
   }
